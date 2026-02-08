@@ -1,39 +1,39 @@
 # Tokamak AI Agent
 
-회사 자체 AI 모델(LiteLLM 기반 OpenAI 호환 API)을 VS Code에서 사용할 수 있는 Extension입니다.
+A VS Code Extension that brings the company's internal AI models (LiteLLM-based OpenAI-compatible API) directly into your development workflow.
 
 ---
 
-## 설치 및 설정
+## Installation & Setup
 
-### 1. Extension 빌드
+### 1. Build Extension
 
 ```bash
-# 의존성 설치
+# Install dependencies
 npm install
 
-# 컴파일
+# Compile source code
 npm run compile
 ```
 
-### 2. 테스트 실행
+### 2. Run in Development Mode
 
-VS Code에서 프로젝트 폴더를 열고 `F5`를 눌러 Extension Development Host를 실행합니다.
+Open the project folder in VS Code and press `F5` to launch the **Extension Development Host**.
 
-### 3. API 설정
+### 3. API Configuration
 
-`Cmd+,` (Mac) / `Ctrl+,` (Windows)로 설정을 열고 `tokamak`을 검색합니다.
+Open Settings (`Cmd+,` on Mac / `Ctrl+,` on Windows) and search for `tokamak`.
 
-| 설정 | 설명 | 필수 |
+| Setting | Description | Required |
 |------|------|:----:|
-| `tokamak.apiKey` | AI 서비스 API Key | ✅ |
-| `tokamak.baseUrl` | API 엔드포인트 URL (예: `https://api.example.com/v1`) | ✅ |
-| `tokamak.models` | 사용 가능한 모델 목록 | - |
-| `tokamak.selectedModel` | 현재 선택된 모델 | - |
-| `tokamak.enableInlineCompletion` | Ghost Text 자동완성 활성화 | - |
-| `tokamak.completionDebounceMs` | 자동완성 딜레이 (기본 300ms) | - |
+| `tokamak.apiKey` | AI Service API Key | ✅ |
+| `tokamak.baseUrl` | API Endpoint URL (e.g., `https://api.example.com/v1`) | ✅ |
+| `tokamak.models` | List of available models | - |
+| `tokamak.selectedModel` | Currently selected model | - |
+| `tokamak.enableInlineCompletion` | Enable/Disable Ghost Text auto-completion | - |
+| `tokamak.completionDebounceMs` | Auto-completion delay (default 300ms) | - |
 
-**settings.json 예시:**
+**Example settings.json:**
 ```json
 {
   "tokamak.apiKey": "your-api-key",
@@ -52,161 +52,160 @@ VS Code에서 프로젝트 폴더를 열고 `F5`를 눌러 Extension Development
 
 ---
 
-## 기능 사용법
+## Core Features
 
-### 1. AI 채팅
+### 1. AI Chat
 
-**채팅 열기:**
-- 단축키: `Cmd+Shift+I` (Mac) / `Ctrl+Shift+I` (Windows)
-- 또는: `Cmd+Shift+P` → "Tokamak: Open Chat"
+**Open Chat:**
+- Shortcut: `Cmd+Shift+I` (Mac) / `Ctrl+Shift+I` (Windows)
+- Or: `Cmd+Shift+P` → "Tokamak: Open Chat"
 
-채팅창이 에디터 옆에 열려서 코드와 폴더 구조를 함께 볼 수 있습니다.
+The chat panel opens alongside your editor, allowing you to see your code and the AI conversation simultaneously.
 
 ```
 ┌──────────┬─────────────────┬─────────────────┐
 │  📁      │                 │                 │
 │  Explorer│   Code Editor   │  Tokamak AI     │
-│  (폴더)  │                 │  Chat           │
+│  (Folder)│                 │  Chat           │
 └──────────┴─────────────────┴─────────────────┘
 ```
 
-#### 파일 첨부 (@멘션)
+#### File Attachment (@mention)
 
-채팅에서 프로젝트 파일을 AI에게 전달할 수 있습니다.
+Reference project files easily within the chat.
 
-1. 입력창에 `@` 입력
-2. 파일명을 타이핑하면 자동완성 목록 표시
-3. `↑` `↓` 키로 선택
-4. `Enter` 또는 `Tab`으로 첨부
+1. Type `@` in the input field.
+2. Start typing a filename to see suggestions.
+3. Use `↑` `↓` to navigate and `Enter` or `Tab` to attach.
 
-여러 파일을 첨부할 수 있습니다.
+You can attach multiple files to a single message.
 
 ```
 ┌─────────────────────────────────────┐
-│  📄 extension.ts        src/        │  ← 자동완성
+│  📄 extension.ts        src/        │  ← Suggestions
 │  📄 chatPanel.ts        src/chat/   │
 │  📄 client.ts           src/api/    │
 └─────────────────────────────────────┘
 ┌─────────────────────────────────────┐
-│ 📄 extension.ts ×  📄 client.ts ×   │  ← 첨부된 파일
+│ 📄 extension.ts ×  📄 client.ts ×   │  ← Attached Files
 ├─────────────────────────────────────┤
-│ 이 두 파일 비교해줘                   │  ← 메시지 입력
+│ Compare these two files               │  ← Message Input
 └─────────────────────────────────────┘
 ```
 
-- **파일 태그 클릭**: 해당 파일을 에디터에서 열기
-- **× 클릭**: 첨부 해제
+- **Click File Tag**: Open the file in the editor.
+- **Click ×**: Remove the attachment.
 
-#### 자동 컨텍스트
+#### Automatic Context
 
-파일을 첨부하지 않으면 **현재 열린 파일**과 **선택한 코드**가 자동으로 AI에게 전달됩니다.
+If no files are explicitly mentioned, the AI automatically receives the **currently active file** and any **selected code** as context.
 
-#### 모델 선택
+#### Model Selection
 
-채팅창 상단의 드롭다운에서 모델을 변경할 수 있습니다.
+Switch between different models using the dropdown at the top of the chat panel.
 
-#### 코드 삽입
+#### Code Insertion
 
-AI 응답의 코드 블록에서 `Insert` 버튼을 클릭하면 현재 커서 위치에 코드가 삽입됩니다.
+Click the `Insert` button on a code block in the AI's response to insert the code at your current cursor position.
 
-#### 터미널 명령 실행
+#### Run Terminal Commands
 
-AI 응답의 bash/shell 코드 블록에서 `▶ Run` 버튼을 클릭하면 통합 터미널에서 명령이 실행됩니다.
+Click the `▶ Run` button on bash/shell code blocks to execute commands directly in the integrated terminal.
 
-#### 선택 코드 → 채팅 전송
+#### Send Selection to Chat
 
-코드를 선택한 후 우클릭 → **Tokamak: Send to Chat**을 선택하면 선택한 코드가 채팅창에 전송됩니다.
+Highlight code, right-click, and select **Tokamak: Send to Chat** to quickly move code snippets to the chat input.
 
-#### 채팅 히스토리
+#### Chat History
 
-채팅 내용은 자동으로 저장되어 VS Code를 재시작해도 유지됩니다. (프로젝트별 저장)
+Conversation history is saved automatically and persists across VS Code restarts (saved per project).
 
 ---
 
-### 2. 슬래시 명령어 (Skills)
+### 2. Slash Commands (Skills)
 
-입력창에서 `/`를 입력하면 사용 가능한 명령어 목록이 표시됩니다.
+Type `/` in the input field to access quick actions.
 
 ```
 ┌─────────────────────────────────────┐
-│ ⚡ /explain    코드 설명            │
-│ ⚡ /refactor   리팩토링 제안         │
-│ ⚡ /fix        버그 찾기 및 수정     │
-│ ⚡ /test       유닛 테스트 생성      │
-│ ⚡ /docs       문서화               │
-│ ⚡ /optimize   성능 최적화          │
-│ ⚡ /security   보안 감사            │
+│ ⚡ /explain    Explain code         │
+│ ⚡ /refactor   Suggest refactoring  │
+│ ⚡ /fix        Find and fix bugs    │
+│ ⚡ /test       Generate unit tests  │
+│ ⚡ /docs       Add documentation    │
+│ ⚡ /optimize   Optimize performance │
+│ ⚡ /security   Security audit       │
 └─────────────────────────────────────┘
 ```
 
-**사용 예시:**
-- `/explain` - 현재 선택된 코드 또는 열린 파일 설명
-- `/fix 이 함수가 null을 반환해` - 추가 컨텍스트와 함께 버그 수정 요청
-- `/test` - 테스트 코드 자동 생성
+**Examples:**
+- `/explain` - Explains selected code or the open file.
+- `/fix This function returns null` - Request a fix with additional context.
+- `/test` - Automatically generates test code.
 
-#### 커스텀 스킬 만들기
+#### Creating Custom Skills
 
-프로젝트에 맞는 커스텀 스킬을 만들 수 있습니다.
+You can define project-specific skills for your team.
 
-**1. 스킬 폴더 초기화:**
+**1. Initialize Skills Folder:**
 ```
 Cmd+Shift+P → "Tokamak: Initialize Skills Folder"
 ```
 
-이 명령은 `.tokamak/skills/` 폴더와 기본 스킬 파일들을 생성합니다.
+This creates the `.tokamak/skills/` directory with default templates.
 
-**2. 스킬 파일 구조:**
+**2. Skills Directory Structure:**
 ```
-프로젝트/
+Project/
 ├── .tokamak/
 │   └── skills/
 │       ├── explain.md      → /explain
 │       ├── refactor.md     → /refactor
-│       ├── my-custom.md    → /my-custom (직접 추가)
+│       ├── my-custom.md    → /my-custom (Add your own)
 │       └── ...
 ```
 
-**3. 스킬 파일 형식:**
+**3. Skill File Format:**
 ```markdown
 ---
-description: 스킬 설명 (자동완성에 표시됨)
+description: Skill description (shown in autocomplete)
 ---
 
-여기에 AI에게 보낼 프롬프트를 작성합니다.
-마크다운 형식을 사용할 수 있습니다.
+Enter the prompt you want to send to the AI here.
+Markdown formatting is supported.
 
-예시:
-1. 첫 번째 지시사항
-2. 두 번째 지시사항
+Example:
+1. First instruction
+2. Second instruction
 ```
 
-**4. 예시 - 코드 리뷰 스킬 (`review.md`):**
+**4. Example - Code Review Skill (`review.md`):**
 ```markdown
 ---
-description: 시니어 개발자 관점 코드 리뷰
+description: Senior developer perspective code review
 ---
 
-이 코드를 시니어 개발자 관점에서 리뷰해주세요:
+Please review this code from a senior developer's perspective:
 
-1. 코드 품질 및 베스트 프랙티스
-2. 잠재적 버그나 엣지 케이스
-3. 보안 이슈
-4. 성능 문제
-5. 개선 제안
+1. Code quality and best practices
+2. Potential bugs or edge cases
+3. Security issues
+4. Performance concerns
+5. Suggestions for improvement
 
-구체적이고 건설적인 피드백을 제공해주세요.
+Provide specific and constructive feedback.
 ```
 
-**장점:**
-- 팀원들과 스킬 공유 (Git으로 관리)
-- 프로젝트별 맞춤 스킬
-- 코드 수정 없이 스킬 추가/수정
+**Benefits:**
+- Share standard prompts with your team via Git.
+- Tailor skills to specific project needs.
+- Update/add skills without touching the extension source code.
 
 ---
 
-### 3. 채팅 모드
+### 3. Chat Modes
 
-채팅창 상단의 탭에서 3가지 모드를 선택할 수 있습니다.
+Choose from three distinct interaction modes at the top of the chat panel.
 
 ```
 ┌─────────────────────────────────────┐
@@ -214,69 +213,42 @@ description: 시니어 개발자 관점 코드 리뷰
 └─────────────────────────────────────┘
 ```
 
-#### 💬 Ask 모드 (기본)
+#### 💬 Ask Mode (Default)
 
-코드에 대해 질문하고 답변을 받는 모드입니다.
+The classic Q&A interaction.
 
-**사용 예시:**
-- "이 함수가 뭘 하는 거야?"
-- "이 에러 어떻게 해결해?"
-- "React에서 상태 관리 어떻게 해?"
+- "How does this function work?"
+- "How do I fix this error?"
+- "Explain state management in React."
 
-**특징:**
-- 단순 질문/답변
-- 코드 수정 없음
-- 가장 빠른 응답
+**Best for:** Simple questions and general knowledge.
 
 ---
 
-#### 📋 Plan 모드
+#### 📋 Plan Mode
 
-구현 전에 작업 계획을 세우는 모드입니다.
+Focuses on architectural planning before implementation.
 
-**사용 예시:**
-- "사용자 인증 기능을 추가하려고 해. 어떻게 구현할까?"
-- "이 코드를 마이크로서비스로 분리하고 싶어"
-- "테스트 코드를 작성하려면 뭘 해야 해?"
+- "I want to add user authentication. How should I approach it?"
+- "I want to split this code into microservices."
+- "What do I need to do to write test code for this?"
 
-**특징:**
-- 구조화된 계획 제공
-- 단계별 구현 순서
-- 수정할 파일 목록
-- 잠재적 문제점 분석
-- **코드를 직접 작성하지 않음**
-
-**응답 형식:**
-```
-1. Overview (개요)
-2. Steps (구현 단계)
-3. Files to modify/create (파일 목록)
-4. Potential challenges (잠재적 문제)
-5. Testing considerations (테스트 고려사항)
-```
+**Provides:** Structured implementation steps, files to modify, and potential challenges **without writing code**.
 
 ---
 
-#### 🤖 Agent 모드
+#### 🤖 Agent Mode
 
-AI가 직접 파일을 생성, 수정, 삭제하는 모드입니다.
+The AI acts as an autonomous agent that can create, edit, and delete files.
 
-**사용 예시:**
-- "로그인 페이지 만들어줘"
-- "이 함수에 에러 핸들링 추가해줘"
-- "테스트 파일 생성해줘"
+- "Create a login page."
+- "Add error handling to this function."
+- "Generate a test file."
 
-**특징:**
-- 실제 파일 생성/수정/삭제
-- 변경 사항 미리보기
-- 승인 후 적용
-
-**사용 흐름:**
-
-1. Agent 모드 선택
-2. 요청 입력 (예: "유틸리티 함수 만들어줘")
-3. AI가 파일 변경 제안
-4. **Pending File Operations** 패널에서 변경 목록 확인
+**Workflow:**
+1. Select Agent mode.
+2. Enter your request.
+3. Review proposed file changes in the **Pending File Operations** panel.
 
 ```
 ┌─────────────────────────────────────┐
@@ -290,25 +262,20 @@ AI가 직접 파일을 생성, 수정, 삭제하는 모드입니다.
 └─────────────────────────────────────┘
 ```
 
-5. **Preview** 클릭 → Diff 뷰어에서 변경 내용 확인
-6. **Apply Changes** 클릭 → 파일에 실제 적용
-7. **Reject** 클릭 → 취소
-
-**주의사항:**
-- 중요한 파일 수정 시 Git 커밋 후 사용 권장
-- 변경 내용을 꼭 확인 후 적용
+4. Click **Preview** to see a Diff of the changes.
+5. Click **Apply Changes** to write to disk, or **Reject** to cancel.
 
 ---
 
-### 3. 코드 자동완성 (Ghost Text)
+### 4. Inline Completion (Ghost Text)
 
-Copilot처럼 코드 작성 중 회색 미리보기로 자동완성을 제안합니다.
+Get real-time suggestions as you type, similar to GitHub Copilot.
 
-- 자동으로 활성화됨
-- `Tab`을 눌러 제안 수락
-- `Esc`로 제안 무시
+- Active by default.
+- Press `Tab` to accept a suggestion.
+- Press `Esc` to ignore.
 
-설정에서 비활성화:
+Disable in settings:
 ```json
 {
   "tokamak.enableInlineCompletion": false
@@ -317,86 +284,67 @@ Copilot처럼 코드 작성 중 회색 미리보기로 자동완성을 제안합
 
 ---
 
-### 3. 코드 설명 / 리팩토링
+### 5. Code Explanation / Refactoring
 
-코드를 선택한 후 우클릭 메뉴에서 사용할 수 있습니다.
+Access features directly from the editor context menu.
 
-#### Explain Code (코드 설명)
+#### Explain Code
+1. Select code.
+2. Right-click → **Tokamak: Explain Code**.
+3. View the explanation in the Output panel.
 
-1. 코드 선택
-2. 우클릭 → **Tokamak: Explain Code**
-3. Output 패널에 설명 표시
-
-#### Refactor Code (코드 리팩토링)
-
-1. 코드 선택
-2. 우클릭 → **Tokamak: Refactor Code**
-3. 리팩토링 유형 선택:
-   - Improve Readability (가독성 개선)
-   - Optimize Performance (성능 최적화)
-   - Add Error Handling (에러 처리 추가)
-   - Extract Function (함수 추출)
-   - Add Types (타입 추가)
-   - Custom (직접 입력)
-4. 결과 확인 후 Apply Changes 클릭
+#### Refactor Code
+1. Select code.
+2. Right-click → **Tokamak: Refactor Code**.
+3. Choose a refactoring type (Readability, Performance, Error Handling, etc.).
+4. Review and Apply the changes.
 
 ---
 
-## 명령어 목록
+## Commands
 
-| 명령어 | 단축키 | 설명 |
+| Command | Shortcut | Description |
 |--------|--------|------|
-| Tokamak: Open Chat | `Cmd+Shift+I` | AI 채팅 열기 |
-| Tokamak: Send to Chat | - | 선택한 코드를 채팅으로 전송 |
-| Tokamak: Explain Code | - | 선택한 코드 설명 |
-| Tokamak: Refactor Code | - | 선택한 코드 리팩토링 |
-| Tokamak: Clear Chat History | - | 채팅 기록 삭제 |
-| Tokamak: Initialize Skills Folder | - | 커스텀 스킬 폴더 생성 |
+| Tokamak: Open Chat | `Cmd+Shift+I` | Open the AI chat panel |
+| Tokamak: Send to Chat | - | Send selected code to chat |
+| Tokamak: Explain Code | - | Get an explanation of the selection |
+| Tokamak: Refactor Code | - | Refactor the selected code |
+| Tokamak: Clear Chat History | - | Delete previous messages |
+| Tokamak: Initialize Skills Folder | - | Create the custom skills directory |
 
 ---
 
-## 문제 해결
+## Troubleshooting
 
-### API 연결 오류
+### API Connection Error
+- Check if the LiteLLM server is running.
+- Verify the model name in settings.
+- Check your network/VPN status.
 
-```
-Error: 500 litellm.InternalServerError: Connection error
-```
-
-- LiteLLM 서버 상태 확인
-- 모델명이 올바른지 확인
-- 네트워크 연결 확인
-
-### 채팅이 열리지 않음
-
-- `Cmd+Shift+P` → "Tokamak: Open Chat" 실행
-- Extension이 활성화되었는지 확인
-
-### 자동완성이 작동하지 않음
-
-- 설정에서 `tokamak.enableInlineCompletion`이 `true`인지 확인
-- API Key와 Base URL이 설정되었는지 확인
+### Chat Panel Not Opening
+- Use `Cmd+Shift+P` → "Tokamak: Open Chat" manually.
+- Check if the extension is enabled in the Extensions view.
 
 ---
 
-## 개발
+## Development
 
 ```bash
-# 컴파일 (한 번)
+# Compile (Once)
 npm run compile
 
-# 감시 모드 (파일 변경 시 자동 컴파일)
+# Watch mode (Auto-compile on change)
 npm run watch
 
-# VSIX 패키징
+# Package as VSIX
 npm run package
 ```
 
 ---
 
-## 기술 스택
+## Tech Stack
 
-- **언어**: TypeScript
-- **빌드**: tsc
+- **Language**: TypeScript
+- **Build**: tsc
 - **API**: OpenAI Node.js SDK
-- **패키징**: vsce
+- **Packaging**: vsce
