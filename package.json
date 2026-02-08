@@ -1,0 +1,138 @@
+{
+  "name": "tokamak-agent",
+  "displayName": "Tokamak AI Agent",
+  "description": "AI coding assistant powered by company's LiteLLM-based OpenAI-compatible API",
+  "version": "0.1.0",
+  "publisher": "tokamak",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tokamak-network/tokamak-ai-agent"
+  },
+  "icon": "images/icon.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Tokamak AI Agent",
+      "properties": {
+        "tokamak.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API Key for the AI service"
+        },
+        "tokamak.baseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Base URL for the AI API endpoint"
+        },
+        "tokamak.models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "qwen3-235b"
+          ],
+          "description": "List of available models"
+        },
+        "tokamak.selectedModel": {
+          "type": "string",
+          "default": "qwen3-235b",
+          "description": "Currently selected model"
+        },
+        "tokamak.enableInlineCompletion": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable inline code completion (Ghost Text)"
+        },
+        "tokamak.completionDebounceMs": {
+          "type": "number",
+          "default": 300,
+          "description": "Debounce delay in milliseconds for inline completions"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "tokamak.openChat",
+        "title": "Tokamak: Open Chat"
+      },
+      {
+        "command": "tokamak.explainCode",
+        "title": "Tokamak: Explain Code"
+      },
+      {
+        "command": "tokamak.refactorCode",
+        "title": "Tokamak: Refactor Code"
+      },
+      {
+        "command": "tokamak.clearChat",
+        "title": "Tokamak: Clear Chat History"
+      },
+      {
+        "command": "tokamak.sendToChat",
+        "title": "Tokamak: Send to Chat"
+      },
+      {
+        "command": "tokamak.initSkills",
+        "title": "Tokamak: Initialize Skills Folder"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "tokamak.openChat",
+        "key": "ctrl+shift+i",
+        "mac": "cmd+shift+i"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "tokamak.sendToChat",
+          "when": "editorHasSelection",
+          "group": "tokamak@0"
+        },
+        {
+          "command": "tokamak.explainCode",
+          "when": "editorHasSelection",
+          "group": "tokamak@1"
+        },
+        {
+          "command": "tokamak.refactorCode",
+          "when": "editorHasSelection",
+          "group": "tokamak@2"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  },
+  "dependencies": {
+    "openai": "^4.24.0"
+  }
+}
