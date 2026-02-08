@@ -76,7 +76,6 @@ export class ChatPanel {
     private currentMode: ChatMode = 'ask';
     private pendingOperations: FileOperation[] = [];
     private currentAbortController: AbortController | null = null;
-    private currentSessionId: string | null = null;
 
     public static setContext(context: vscode.ExtensionContext): void {
         ChatPanel.extensionContext = context;
@@ -770,13 +769,6 @@ export function helper() {
         // Create AbortController for this request
         this.currentAbortController = new AbortController();
 
-        // Generate unique session ID for this request
-        this.currentSessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        const sessionId = this.currentSessionId;
-
-        // Notify webview about new session
-        this.panel.webview.postMessage({ command: 'newSession', sessionId: sessionId });
-
         try {
             let fullResponse = '';
             const systemMessage: ChatMessage = {
@@ -788,11 +780,11 @@ export function helper() {
                 [systemMessage, ...this.chatHistory],
                 this.currentAbortController.signal
             )) {
-                if (this.currentAbortController.signal.aborted || sessionId !== this.currentSessionId) {
+                if (this.currentAbortController.signal.aborted) {
                     break;
                 }
                 fullResponse += chunk;
-                this.panel.webview.postMessage({ command: 'streamChunk', content: chunk, sessionId: sessionId });
+                this.panel.webview.postMessage({ command: 'streamChunk', content: chunk });
             }
 
             if (!this.currentAbortController.signal.aborted) {
@@ -1506,7 +1498,6 @@ export function helper() {
         let mentionStartIndex = -1;
         let slashStartIndex = -1;
         let currentMode = 'ask';
-        let currentSessionId = null;
 
         const modeDescriptions = {
             ask: 'Ask questions about your code',
@@ -1903,20 +1894,10 @@ export function helper() {
                 case 'addMessage':
                     addMessage(message.role, message.content);
                     break;
-                case 'newSession':
-                    // New session started, reset streaming state
-                    currentSessionId = message.sessionId;
-                    streamingContent = '';
-                    currentStreamingMessage = null;
-                    break;
                 case 'startStreaming':
                     startStreaming();
                     break;
                 case 'streamChunk':
-                    // Only process chunks from current session
-                    if (message.sessionId && message.sessionId !== currentSessionId) {
-                        break;
-                    }
                     handleStreamChunk(message.content);
                     break;
                 case 'endStreaming':
