@@ -66,12 +66,22 @@ export async function* streamChatCompletion(
         signal: abortSignal,
     });
 
+    let lastChunk = '';
+    let lastYieldTime = 0;
+
     for await (const chunk of stream) {
         if (abortSignal?.aborted) {
             break;
         }
         const content = chunk.choices[0]?.delta?.content;
         if (content) {
+            // Filter out duplicate consecutive chunks that arrive too quickly
+            const now = Date.now();
+            if (content === lastChunk && (now - lastYieldTime) < 50) {
+                continue;
+            }
+            lastChunk = content;
+            lastYieldTime = now;
             yield content;
         }
     }
