@@ -17,23 +17,7 @@
 
 ---
 
-## 소스 코드 빌드 (개발자용)
-
-### 1. Extension 빌드
-
-```bash
-# 의존성 설치
-npm install
-
-# 컴파일
-npm run compile
-```
-
-### 2. 테스트 실행
-
-VS Code에서 프로젝트 폴더를 열고 `F5`를 눌러 Extension Development Host를 실행합니다.
-
-### 3. API 설정
+## API 설정
 
 `Cmd+,` (Mac) / `Ctrl+,` (Windows)로 설정을 열고 `tokamak`을 검색합니다.
 
@@ -62,6 +46,25 @@ VS Code에서 프로젝트 폴더를 열고 `F5`를 눌러 Extension Development
   "tokamak.selectedModel": "qwen3-235b-thinking"
 }
 ```
+
+---
+
+## 소스 코드 빌드 (개발자용)
+
+### 1. Extension 빌드
+
+```bash
+# 의존성 설치
+npm install
+
+# 컴파일
+npm run compile
+```
+
+### 2. 테스트 실행
+
+VS Code에서 프로젝트 폴더를 열고 `F5`를 눌러 Extension Development Host를 실행합니다.
+
 
 ---
 

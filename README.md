@@ -17,23 +17,7 @@ You can easily install the extension using the pre-built VSIX file without build
 
 ---
 
-## Build from Source (For Developers)
-
-### 1. Build Extension
-
-```bash
-# Install dependencies
-npm install
-
-# Compile source code
-npm run compile
-```
-
-### 2. Run in Development Mode
-
-Open the project folder in VS Code and press `F5` to launch the **Extension Development Host**.
-
-### 3. API Configuration
+## API Configuration
 
 Open Settings (`Cmd+,` on Mac / `Ctrl+,` on Windows) and search for `tokamak`.
 
@@ -62,6 +46,25 @@ Open Settings (`Cmd+,` on Mac / `Ctrl+,` on Windows) and search for `tokamak`.
   "tokamak.selectedModel": "qwen3-235b-thinking"
 }
 ```
+
+---
+
+## Build from Source (For Developers)
+
+### 1. Build Extension
+
+```bash
+# Install dependencies
+npm install
+
+# Compile source code
+npm run compile
+```
+
+### 2. Run in Development Mode
+
+Open the project folder in VS Code and press `F5` to launch the **Extension Development Host**.
+
 
 ---
 
