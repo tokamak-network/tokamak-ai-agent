@@ -1557,20 +1557,42 @@ export function helper() {
         }
 
         function startStreaming() {
+            // Ensure no lingering streaming state
             streamingContent = '';
-            currentStreamingMessage = addMessage('assistant', '');
+            
+            // Create new message container
+            currentStreamingMessage = document.createElement('div');
+            currentStreamingMessage.className = 'message assistant';
+            
+            const roleDiv = document.createElement('div');
+            roleDiv.className = 'message-role';
+            roleDiv.textContent = 'Tokamak AI';
+            
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            
+            currentStreamingMessage.appendChild(roleDiv);
+            currentStreamingMessage.appendChild(contentDiv);
+            chatContainer.appendChild(currentStreamingMessage);
+            
             typingIndicator.classList.add('visible');
             sendBtn.style.display = 'none';
             stopBtn.classList.add('visible');
+            chatContainer.scrollTop = chatContainer.scrollHeight;
         }
 
         function handleStreamChunk(chunk) {
+            if (!currentStreamingMessage) return;
+            
             streamingContent += chunk;
-            if (currentStreamingMessage) {
-                const contentDiv = currentStreamingMessage.querySelector('.message-content');
-                contentDiv.innerHTML = parseMarkdown(streamingContent);
-                chatContainer.scrollTop = chatContainer.scrollHeight;
-            }
+            const contentDiv = currentStreamingMessage.querySelector('.message-content');
+            
+            // Re-render markdown only when necessary (e.g., block finished) or use a simpler update for speed
+            // For now, full re-render is safer for markdown but let's ensure we are targeting the correct element
+            contentDiv.innerHTML = parseMarkdown(streamingContent);
+            
+            // Auto-scroll
+            chatContainer.scrollTop = chatContainer.scrollHeight;
         }
 
         function endStreaming() {
