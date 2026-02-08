@@ -1,12 +1,12 @@
 .vscode/**
 .vscode-test/**
+out/*.map
 src/**
 node_modules/**
-.gitignore
-.yarnrc
 vsc-extension-quickstart.md
 **/tsconfig.json
+**/.gitignore
 **/.eslintrc.json
-**/*.map
-**/*.ts
-!node_modules/openai/**
+**/.vscodeignore
+*.vsix
+.DS_Store

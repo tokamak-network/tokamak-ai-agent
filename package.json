@@ -19,6 +19,12 @@
     "Other"
   ],
   "activationEvents": [
+    "onCommand:tokamak.openChat",
+    "onCommand:tokamak.explainCode",
+    "onCommand:tokamak.refactorCode",
+    "onCommand:tokamak.clearChat",
+    "onCommand:tokamak.sendToChat",
+    "onCommand:tokamak.initSkills",
     "onStartupFinished"
   ],
   "main": "./out/extension.js",
@@ -117,20 +123,23 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run bundle",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts",
-    "package": "vsce package"
+    "bundle": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
+    "bundle-watch": "npm run bundle -- --watch",
+    "package": "npm run bundle && vsce package"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.13.0",
     "@typescript-eslint/parser": "^6.13.0",
+    "@vscode/vsce": "^2.22.0",
+    "esbuild": "^0.27.3",
     "eslint": "^8.54.0",
-    "typescript": "^5.3.0",
-    "@vscode/vsce": "^2.22.0"
+    "typescript": "^5.3.0"
   },
   "dependencies": {
     "openai": "^4.24.0"
