@@ -66,12 +66,18 @@ export async function* streamChatCompletion(
         signal: abortSignal,
     });
 
+    let lastChunk = '';
     for await (const chunk of stream) {
         if (abortSignal?.aborted) {
             break;
         }
         const content = chunk.choices[0]?.delta?.content;
         if (content) {
+            // Skip duplicate consecutive chunks (fixes double output issue)
+            if (content === lastChunk) {
+                continue;
+            }
+            lastChunk = content;
             yield content;
         }
     }

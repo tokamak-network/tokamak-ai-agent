@@ -766,8 +766,10 @@ export function helper() {
         // Start streaming indicator
         this.panel.webview.postMessage({ command: 'startStreaming' });
 
-        // Create AbortController for this request
-        this.currentAbortController = new AbortController();
+        // Create AbortController for this request (capture as local variable!)
+        const abortController = new AbortController();
+        this.currentAbortController = abortController;
+        const signal = abortController.signal;
 
         try {
             let fullResponse = '';
@@ -778,16 +780,16 @@ export function helper() {
 
             for await (const chunk of streamChatCompletion(
                 [systemMessage, ...this.chatHistory],
-                this.currentAbortController.signal
+                signal
             )) {
-                if (this.currentAbortController.signal.aborted) {
+                if (signal.aborted) {
                     break;
                 }
                 fullResponse += chunk;
                 this.panel.webview.postMessage({ command: 'streamChunk', content: chunk });
             }
 
-            if (!this.currentAbortController.signal.aborted) {
+            if (!signal.aborted) {
                 this.chatHistory.push({ role: 'assistant', content: fullResponse });
                 this.saveChatHistory();
                 this.panel.webview.postMessage({ command: 'endStreaming' });
@@ -1737,10 +1739,14 @@ export function helper() {
             items[selectedAutocompleteIndex].scrollIntoView({ block: 'nearest' });
         }
 
+        let isSending = false;
         function sendMessage() {
+            if (isSending) return; // Prevent duplicate calls
+            
             const text = messageInput.value.trim();
             if (!text && attachedFiles.length === 0) return;
 
+            isSending = true;
             sendBtn.disabled = true;
             vscode.postMessage({
                 command: 'sendMessage',
@@ -1752,6 +1758,9 @@ export function helper() {
             attachedFiles = [];
             attachedFilesContainer.innerHTML = '';
             hideAutocomplete();
+            
+            // Reset flag after a short delay
+            setTimeout(() => { isSending = false; }, 100);
         }
 
         function updateModels(models, selected) {
