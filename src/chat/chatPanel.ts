@@ -731,6 +731,12 @@ export function helper() {
             }
         }
 
+        // Cancel previous request if exists
+        if (this.currentAbortController) {
+            this.currentAbortController.abort();
+            this.currentAbortController = null;
+        }
+
         // Parse slash commands
         const { command: slashCommand, remainingText } = await this.parseSlashCommand(text);
         let processedText = text;
@@ -753,7 +759,11 @@ export function helper() {
         const displayText = attachedFiles.length > 0
             ? `${text}\n\n📎 ${attachedFiles.join(', ')}`
             : text;
+
+        // Send user message to UI
         this.panel.webview.postMessage({ command: 'addMessage', role: 'user', content: displayText });
+
+        // Start streaming indicator
         this.panel.webview.postMessage({ command: 'startStreaming' });
 
         // Create AbortController for this request
@@ -770,27 +780,32 @@ export function helper() {
                 [systemMessage, ...this.chatHistory],
                 this.currentAbortController.signal
             )) {
+                if (this.currentAbortController.signal.aborted) {
+                    break;
+                }
                 fullResponse += chunk;
                 this.panel.webview.postMessage({ command: 'streamChunk', content: chunk });
             }
 
-            this.chatHistory.push({ role: 'assistant', content: fullResponse });
-            this.saveChatHistory();
-            this.panel.webview.postMessage({ command: 'endStreaming' });
+            if (!this.currentAbortController.signal.aborted) {
+                this.chatHistory.push({ role: 'assistant', content: fullResponse });
+                this.saveChatHistory();
+                this.panel.webview.postMessage({ command: 'endStreaming' });
 
-            // In agent mode, parse file operations
-            if (this.currentMode === 'agent') {
-                const operations = this.parseFileOperations(fullResponse);
-                if (operations.length > 0) {
-                    this.pendingOperations = operations;
-                    this.panel.webview.postMessage({
-                        command: 'showOperations',
-                        operations: operations.map(op => ({
-                            type: op.type,
-                            path: op.path,
-                            description: op.description,
-                        })),
-                    });
+                // In agent mode, parse file operations
+                if (this.currentMode === 'agent') {
+                    const operations = this.parseFileOperations(fullResponse);
+                    if (operations.length > 0) {
+                        this.pendingOperations = operations;
+                        this.panel.webview.postMessage({
+                            command: 'showOperations',
+                            operations: operations.map(op => ({
+                                type: op.type,
+                                path: op.path,
+                                description: op.description,
+                            })),
+                        });
+                    }
                 }
             }
         } catch (error) {
@@ -799,12 +814,7 @@ export function helper() {
             // Handle different error types
             if (error instanceof Error) {
                 if (error.name === 'AbortError' || error.message.includes('aborted')) {
-                    // User cancelled - don't show error
-                    this.panel.webview.postMessage({
-                        command: 'addMessage',
-                        role: 'assistant',
-                        content: '⏹️ 생성이 중단되었습니다.',
-                    });
+                    // User cancelled - do nothing or show cancelled message
                 } else if (error.message.includes('401') || error.message.includes('Unauthorized')) {
                     this.panel.webview.postMessage({
                         command: 'addMessage',
