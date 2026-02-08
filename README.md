@@ -4,7 +4,20 @@ A VS Code Extension that brings the company's internal AI models (LiteLLM-based 
 
 ---
 
-## Installation & Setup
+## Quick Start (Installation)
+
+### 1. Download & Install via VSIX
+You can easily install the extension using the pre-built VSIX file without building it from source.
+
+1. Download the `.vsix` file from the [GitHub Releases](https://github.com/tokamak-network/tokamak-ai-agent/releases).
+2. In VS Code, open the **Extensions** view (`Cmd+Shift+X`).
+3. Click the **More Actions...** (three dots) menu in the top-right corner of the Extensions view.
+4. Select **Install from VSIX...**.
+5. Select the downloaded `.vsix` file.
+
+---
+
+## Build from Source (For Developers)
 
 ### 1. Build Extension
 
