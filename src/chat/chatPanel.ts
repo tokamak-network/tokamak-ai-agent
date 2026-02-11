@@ -1759,6 +1759,8 @@ export function helper() {
             <div style="flex:1"></div>
             <h3>Tokamak AI</h3>
             <div style="flex:1"></div>
+            <label for="model-select" style="font-size: 0.8em; opacity: 0.7;">Model:</label>
+            <select id="model-select"></select>
             <button id="new-chat-btn" title="Start new conversation">+ New</button>
         </div>
         <div id="mode-tabs">
