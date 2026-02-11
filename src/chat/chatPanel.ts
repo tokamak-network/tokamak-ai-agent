@@ -64,6 +64,14 @@ interface FileOperation {
     description: string;
 }
 
+interface ChatSession {
+    id: string;
+    title: string;
+    messages: ChatMessage[];
+    mode: ChatMode;
+    timestamp: number;
+}
+
 export class ChatPanel {
     public static currentPanel: ChatPanel | undefined;
     private static readonly viewType = 'tokamakChat';
@@ -72,6 +80,8 @@ export class ChatPanel {
     private readonly panel: vscode.WebviewPanel;
     private readonly extensionUri: vscode.Uri;
     private chatHistory: ChatMessage[] = [];
+    private sessions: ChatSession[] = [];
+    private currentSessionId: string | undefined;
     private disposables: vscode.Disposable[] = [];
     private currentMode: ChatMode = 'ask';
     private pendingOperations: FileOperation[] = [];
@@ -93,80 +103,114 @@ export class ChatPanel {
         this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 
         this.panel.webview.onDidReceiveMessage(
-            async (message) => {
-                switch (message.command) {
-                    case 'sendMessage':
-                        await this.handleUserMessage(message.text, message.attachedFiles || []);
-                        break;
-                    case 'insertCode':
-                        await this.insertCodeToEditor(message.code);
-                        break;
-                    case 'selectModel':
-                        await this.handleModelChange(message.model);
-                        break;
-                    case 'selectMode':
-                        this.currentMode = message.mode;
-                        this.saveChatHistory();
-                        this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
-                        break;
-                    case 'ready':
-                        this.updateModelList();
-                        this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
-                        this.sendRestoredHistory();
-                        break;
-                    case 'searchFiles':
-                        await this.searchFiles(message.query);
-                        break;
-                    case 'openFile':
-                        await this.openFile(message.path);
-                        break;
-                    case 'applyOperations':
-                        await this.applyFileOperations();
-                        break;
-                    case 'rejectOperation':
-                        if (message.index !== undefined && message.index >= 0 && message.index < this.pendingOperations.length) {
-                            this.pendingOperations.splice(message.index, 1);
-                            if (this.pendingOperations.length === 0) {
-                                this.panel.webview.postMessage({ command: 'operationsCleared' });
-                            } else {
-                                this.panel.webview.postMessage({
-                                    command: 'showOperations',
-                                    operations: this.pendingOperations.map(op => ({
-                                        type: op.type,
-                                        path: op.path,
-                                        description: op.description,
-                                    })),
-                                });
-                            }
-                        }
-                        break;
-                    case 'rejectOperations':
-                        this.pendingOperations = [];
-                        this.panel.webview.postMessage({ command: 'operationsCleared' });
-                        break;
-                    case 'newChat':
-                        this.clearChat();
-                        break;
-                    case 'previewOperation':
-                        await this.previewFileOperation(message.index);
-                        break;
-                    case 'resolveFilePath':
-                        await this.resolveFilePath(message.uri);
-                        break;
-                    case 'runCommand':
-                        await this.runInTerminal(message.command);
-                        break;
-                    case 'searchSlashCommands':
-                        await this.searchSlashCommands(message.query);
-                        break;
-                    case 'stopGeneration':
-                        this.stopGeneration();
-                        break;
-                }
-            },
+            async (message) => this.handleMessage(message),
             null,
             this.disposables
         );
+    }
+
+    private async handleMessage(message: any): Promise<void> {
+        switch (message.command) {
+            case 'sendMessage':
+                await this.handleUserMessage(message.text, message.attachedFiles || []);
+                break;
+            case 'insertCode':
+                await this.insertCodeToEditor(message.code);
+                break;
+            case 'selectModel':
+                await this.handleModelChange(message.model);
+                break;
+            case 'selectMode':
+                this.currentMode = message.mode;
+                this.saveChatHistory();
+                this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
+                break;
+            case 'ready':
+                this.updateModelList();
+                this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
+                this.sendRestoredHistory();
+                break;
+            case 'getSessions':
+                this.panel.webview.postMessage({
+                    command: 'sessionsList',
+                    sessions: this.sessions.map(s => ({ id: s.id, title: s.title, timestamp: s.timestamp })),
+                    currentSessionId: this.currentSessionId
+                });
+                break;
+            case 'loadSession':
+                const session = this.sessions.find(s => s.id === message.sessionId);
+                if (session) {
+                    this.saveChatHistory();
+                    this.currentSessionId = session.id;
+                    this.chatHistory = session.messages;
+                    this.currentMode = session.mode;
+                    this.panel.webview.postMessage({ command: 'clearMessages' });
+                    this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
+                    this.sendRestoredHistory();
+                }
+                break;
+            case 'deleteSession':
+                this.sessions = this.sessions.filter(s => s.id !== message.sessionId);
+                if (this.currentSessionId === message.sessionId) {
+                    this.clearChat();
+                } else {
+                    this.saveChatHistory();
+                }
+                this.panel.webview.postMessage({
+                    command: 'sessionsList',
+                    sessions: this.sessions.map(s => ({ id: s.id, title: s.title, timestamp: s.timestamp })),
+                    currentSessionId: this.currentSessionId
+                });
+                break;
+            case 'searchFiles':
+                await this.searchFiles(message.query);
+                break;
+            case 'openFile':
+                await this.openFile(message.path);
+                break;
+            case 'applyOperations':
+                await this.applyFileOperations();
+                break;
+            case 'rejectOperation':
+                if (message.index !== undefined && message.index >= 0 && message.index < this.pendingOperations.length) {
+                    this.pendingOperations.splice(message.index, 1);
+                    if (this.pendingOperations.length === 0) {
+                        this.panel.webview.postMessage({ command: 'operationsCleared' });
+                    } else {
+                        this.panel.webview.postMessage({
+                            command: 'showOperations',
+                            operations: this.pendingOperations.map(op => ({
+                                type: op.type,
+                                path: op.path,
+                                description: op.description,
+                            })),
+                        });
+                    }
+                }
+                break;
+            case 'rejectOperations':
+                this.pendingOperations = [];
+                this.panel.webview.postMessage({ command: 'operationsCleared' });
+                break;
+            case 'newChat':
+                this.clearChat();
+                break;
+            case 'previewOperation':
+                await this.previewFileOperation(message.index);
+                break;
+            case 'resolveFilePath':
+                await this.resolveFilePath(message.uri);
+                break;
+            case 'runCommand':
+                await this.runInTerminal(message.command);
+                break;
+            case 'stopGeneration':
+                this.stopGeneration();
+                break;
+            case 'searchSlashCommands':
+                await this.searchSlashCommands(message.query);
+                break;
+        }
     }
 
     public static createOrShow(extensionUri: vscode.Uri): void {
@@ -200,22 +244,61 @@ export class ChatPanel {
 
     private saveChatHistory(): void {
         if (ChatPanel.extensionContext) {
-            // Use workspace state for per-project history
-            ChatPanel.extensionContext.workspaceState.update('tokamak.chatHistory', this.chatHistory);
-            ChatPanel.extensionContext.workspaceState.update('tokamak.chatMode', this.currentMode);
+            // Update current session in the list
+            if (!this.currentSessionId) {
+                this.currentSessionId = Date.now().toString();
+            }
+
+            const existingIndex = this.sessions.findIndex(s => s.id === this.currentSessionId);
+
+            // Get title from first user message if not set
+            let title = 'New Conversation';
+            const firstUserMessage = this.chatHistory.find(m => m.role === 'user');
+            if (firstUserMessage) {
+                title = firstUserMessage.content.split('\n')[0].substring(0, 30) + (firstUserMessage.content.length > 30 ? '...' : '');
+            }
+
+            const session: ChatSession = {
+                id: this.currentSessionId,
+                title: title,
+                messages: this.chatHistory,
+                mode: this.currentMode,
+                timestamp: Date.now()
+            };
+
+            if (existingIndex >= 0) {
+                this.sessions[existingIndex] = session;
+            } else {
+                this.sessions.unshift(session);
+            }
+
+            // Limit sessions to 50
+            if (this.sessions.length > 50) {
+                this.sessions = this.sessions.slice(0, 50);
+            }
+
+            ChatPanel.extensionContext.workspaceState.update('tokamak.sessions', this.sessions);
+            ChatPanel.extensionContext.workspaceState.update('tokamak.currentSessionId', this.currentSessionId);
         }
     }
 
     private restoreChatHistory(): void {
         if (ChatPanel.extensionContext) {
-            const savedHistory = ChatPanel.extensionContext.workspaceState.get<ChatMessage[]>('tokamak.chatHistory');
-            const savedMode = ChatPanel.extensionContext.workspaceState.get<ChatMode>('tokamak.chatMode');
+            this.sessions = ChatPanel.extensionContext.workspaceState.get<ChatSession[]>('tokamak.sessions') || [];
+            this.currentSessionId = ChatPanel.extensionContext.workspaceState.get<string>('tokamak.currentSessionId');
 
-            if (savedHistory && savedHistory.length > 0) {
-                this.chatHistory = savedHistory;
-            }
-            if (savedMode) {
-                this.currentMode = savedMode;
+            if (this.currentSessionId) {
+                const currentSession = this.sessions.find(s => s.id === this.currentSessionId);
+                if (currentSession) {
+                    this.chatHistory = currentSession.messages;
+                    this.currentMode = currentSession.mode;
+                }
+            } else if (this.sessions.length > 0) {
+                // Load latest session if no current ID
+                const latest = this.sessions[0];
+                this.currentSessionId = latest.id;
+                this.chatHistory = latest.messages;
+                this.currentMode = latest.mode;
             }
         }
     }
@@ -1555,16 +1638,128 @@ export function helper() {
             color: var(--vscode-foreground);
             border: 1px solid var(--vscode-widget-border) !important;
         }
+
+        /* Sessions History Panel */
+        #history-panel {
+            position: fixed;
+            top: 0;
+            left: -300px;
+            width: 300px;
+            height: 100%;
+            background-color: var(--vscode-sideBar-background);
+            border-right: 1px solid var(--vscode-widget-border);
+            z-index: 1000;
+            transition: left 0.3s ease;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 2px 0 10px rgba(0,0,0,0.2);
+        }
+        #history-panel.visible {
+            left: 0;
+        }
+        #history-header {
+            padding: 15px;
+            border-bottom: 1px solid var(--vscode-widget-border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        #history-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+        }
+        .session-item {
+            padding: 10px;
+            margin-bottom: 8px;
+            border-radius: 6px;
+            cursor: pointer;
+            border: 1px solid transparent;
+            position: relative;
+            transition: all 0.2s;
+        }
+        .session-item:hover {
+            background-color: var(--vscode-list-hoverBackground);
+            border-color: var(--vscode-widget-border);
+        }
+        .session-item.active {
+            background-color: var(--vscode-list-activeSelectionBackground);
+            color: var(--vscode-list-activeSelectionForeground);
+        }
+        .session-title {
+            font-weight: 500;
+            font-size: 0.9em;
+            margin-bottom: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .session-date {
+            font-size: 0.75em;
+            opacity: 0.6;
+        }
+        .delete-session {
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            opacity: 0;
+            cursor: pointer;
+            padding: 4px;
+        }
+        .session-item:hover .delete-session {
+            opacity: 0.6;
+        }
+        .session-item .delete-session:hover {
+            opacity: 1;
+            color: var(--vscode-errorForeground);
+        }
+        #history-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.3);
+            z-index: 999;
+        }
+        #history-overlay.visible {
+            display: block;
+        }
+        #history-btn {
+            background: transparent;
+            border: 1px solid var(--vscode-widget-border);
+            color: var(--vscode-foreground);
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85em;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        #history-btn:hover {
+            background: var(--vscode-toolbar-hoverBackground);
+        }
     </style>
 </head>
 <body>
+    <div id="history-overlay"></div>
+    <div id="history-panel">
+        <div id="history-header">
+            <h4>Chat History</h4>
+            <button id="close-history" style="background:none; border:none; color:inherit; cursor:pointer; font-size:1.4em;">×</button>
+        </div>
+        <div id="history-list"></div>
+    </div>
     <div id="header">
         <div id="header-top">
-            <h3>Tokamak AI</h3>
-            <button id="new-chat-btn" title="Start new conversation">+ New</button>
+            <button id="history-btn" title="Past Conversations">🕒 History</button>
             <div style="flex:1"></div>
-            <label for="model-select">Model:</label>
-            <select id="model-select"></select>
+            <h3>Tokamak AI</h3>
+            <div style="flex:1"></div>
+            <button id="new-chat-btn" title="Start new conversation">+ New</button>
         </div>
         <div id="mode-tabs">
             <button class="mode-tab active" data-mode="ask">💬 Ask</button>
@@ -1621,6 +1816,11 @@ export function helper() {
         const applyBtn = document.getElementById('apply-btn');
         const rejectBtn = document.getElementById('reject-btn');
         const newChatBtn = document.getElementById('new-chat-btn');
+        const historyBtn = document.getElementById('history-btn');
+        const historyPanel = document.getElementById('history-panel');
+        const historyList = document.getElementById('history-list');
+        const historyOverlay = document.getElementById('history-overlay');
+        const closeHistoryBtn = document.getElementById('close-history');
 
         let currentStreamingMessage = null;
         let streamingContent = '';
@@ -1959,6 +2159,45 @@ export function helper() {
             operationsList.innerHTML = '';
         }
 
+        // History Panel Handlers
+        historyBtn.addEventListener('click', () => {
+            historyPanel.classList.add('visible');
+            historyOverlay.classList.add('visible');
+            vscode.postMessage({ command: 'getSessions' });
+        });
+
+        const closeHistory = () => {
+            historyPanel.classList.remove('visible');
+            historyOverlay.classList.remove('visible');
+        };
+
+        closeHistoryBtn.addEventListener('click', closeHistory);
+        historyOverlay.addEventListener('click', closeHistory);
+
+        function renderSessions(sessions, currentId) {
+            historyList.innerHTML = sessions.map(s => {
+                const date = new Date(s.timestamp).toLocaleString();
+                const activeClass = s.id === currentId ? 'active' : '';
+                const title = s.title || 'New Conversation';
+                return '<div class="session-item ' + activeClass + '" data-id="' + s.id + '">' +
+                       '<div class="session-title">' + title + '</div>' +
+                       '<div class="session-date">' + date + '</div>' +
+                       '<span class="delete-session" data-id="' + s.id + '">🗑️</span>' +
+                       '</div>';
+            }).join('');
+
+            historyList.querySelectorAll('.session-item').forEach(item => {
+                item.addEventListener('click', (e) => {
+                    if (e.target.classList.contains('delete-session')) {
+                        vscode.postMessage({ command: 'deleteSession', sessionId: e.target.dataset.id });
+                    } else {
+                        vscode.postMessage({ command: 'loadSession', sessionId: item.dataset.id });
+                        closeHistory();
+                    }
+                });
+            });
+        }
+
         // Mode tabs
         modeTabs.forEach(tab => {
             tab.addEventListener('click', () => {
@@ -2110,6 +2349,9 @@ export function helper() {
                     break;
                 case 'slashCommandResults':
                     showSlashAutocomplete(message.commands);
+                    break;
+                case 'sessionsList':
+                    renderSessions(message.sessions, message.currentSessionId);
                     break;
                 case 'generationStopped':
                     endStreaming();
