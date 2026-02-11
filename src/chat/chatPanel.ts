@@ -123,6 +123,23 @@ export class ChatPanel {
                     case 'applyOperations':
                         await this.applyFileOperations();
                         break;
+                    case 'rejectOperation':
+                        if (message.index !== undefined && message.index >= 0 && message.index < this.pendingOperations.length) {
+                            this.pendingOperations.splice(message.index, 1);
+                            if (this.pendingOperations.length === 0) {
+                                this.panel.webview.postMessage({ command: 'operationsCleared' });
+                            } else {
+                                this.panel.webview.postMessage({
+                                    command: 'showOperations',
+                                    operations: this.pendingOperations.map(op => ({
+                                        type: op.type,
+                                        path: op.path,
+                                        description: op.description,
+                                    })),
+                                });
+                            }
+                        }
+                        break;
                     case 'rejectOperations':
                         this.pendingOperations = [];
                         this.panel.webview.postMessage({ command: 'operationsCleared' });
@@ -1503,6 +1520,20 @@ export function helper() {
         .operation-item .preview-btn:hover {
             background-color: var(--vscode-toolbar-hoverBackground);
         }
+        .operation-item .reject-item-btn {
+            padding: 2px 6px;
+            border: none;
+            background-color: transparent;
+            color: var(--vscode-foreground);
+            cursor: pointer;
+            font-size: 1.1em;
+            opacity: 0.6;
+            margin-left: 4px;
+        }
+        .operation-item .reject-item-btn:hover {
+            opacity: 1;
+            color: var(--vscode-errorForeground);
+        }
         #operations-buttons {
             display: flex;
             gap: 8px;
@@ -1593,6 +1624,7 @@ export function helper() {
 
         let currentStreamingMessage = null;
         let streamingContent = '';
+        let typingInterval = null;
         let attachedFiles = [];
         let autocompleteFiles = [];
         let autocompleteCommands = [];
@@ -1679,6 +1711,16 @@ export function helper() {
             chatContainer.appendChild(currentStreamingMessage);
             
             typingIndicator.classList.add('visible');
+            
+            // Start animation
+            let dots = 0;
+            typingIndicator.textContent = 'AI is thinking';
+            if (typingInterval) clearInterval(typingInterval);
+            typingInterval = setInterval(() => {
+                dots = (dots + 1) % 4;
+                typingIndicator.textContent = 'AI is thinking' + '.'.repeat(dots);
+            }, 500);
+
             sendBtn.style.display = 'none';
             stopBtn.classList.add('visible');
             chatContainer.scrollTop = chatContainer.scrollHeight;
@@ -1699,6 +1741,12 @@ export function helper() {
         }
 
         function endStreaming() {
+            if (typingInterval) {
+                clearInterval(typingInterval);
+                typingInterval = null;
+            }
+            typingIndicator.textContent = 'AI is thinking...';
+
             currentStreamingMessage = null;
             typingIndicator.classList.remove('visible');
             sendBtn.disabled = false;
@@ -1878,19 +1926,28 @@ export function helper() {
         }
 
         function showOperations(operations) {
-            operationsList.innerHTML = operations.map((op, index) => \`
-                <div class="operation-item">
-                    <span class="op-type \${op.type}">\${op.type.toUpperCase()}</span>
-                    <span class="op-path">\${op.path}</span>
-                    <button class="preview-btn" data-index="\${index}">Preview</button>
-                </div>
-            \`).join('');
+            operationsList.innerHTML = operations.map((op, index) => 
+                '<div class="operation-item">' +
+                '<span class="op-type ' + op.type + '">' + op.type.toUpperCase() + '</span>' +
+                '<span class="op-path">' + op.path + '</span>' +
+                '<button class="preview-btn" data-index="' + index + '">Preview</button>' +
+                '<button class="reject-item-btn" data-index="' + index + '" title="Reject this change">×</button>' +
+                '</div>'
+            ).join('');
 
             // Add preview button handlers
             operationsList.querySelectorAll('.preview-btn').forEach(btn => {
                 btn.addEventListener('click', () => {
                     const index = parseInt(btn.dataset.index);
                     vscode.postMessage({ command: 'previewOperation', index: index });
+                });
+            });
+
+            // Add individual reject button handlers
+            operationsList.querySelectorAll('.reject-item-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const index = parseInt(btn.dataset.index);
+                    vscode.postMessage({ command: 'rejectOperation', index: index });
                 });
             });
 
