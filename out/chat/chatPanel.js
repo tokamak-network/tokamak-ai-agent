@@ -1,18 +1,44 @@
-import * as vscode from 'vscode';
-import { streamChatCompletion, ChatMessage } from '../api/client.js';
-import { isConfigured, promptForConfiguration, getAvailableModels, getSelectedModel, setSelectedModel } from '../config/settings.js';
-
-type ChatMode = 'ask' | 'plan' | 'agent';
-
-interface SlashCommand {
-    name: string;
-    description: string;
-    prompt: string;
-    isBuiltin: boolean;
-}
-
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.ChatPanel = void 0;
+const vscode = __importStar(require("vscode"));
+const client_js_1 = require("../api/client.js");
+const settings_js_1 = require("../config/settings.js");
 // 기본 내장 스킬 (파일이 없을 때 사용)
-const BUILTIN_SKILLS: SlashCommand[] = [
+const BUILTIN_SKILLS = [
     {
         name: '/explain',
         description: 'Explain the selected code in detail',
@@ -56,144 +82,112 @@ const BUILTIN_SKILLS: SlashCommand[] = [
         isBuiltin: true,
     },
 ];
-
-interface FileOperation {
-    type: 'create' | 'edit' | 'delete' | 'read';
-    path: string;
-    content?: string;
-    description: string;
-}
-
-export class ChatPanel {
-    public static currentPanel: ChatPanel | undefined;
-    private static readonly viewType = 'tokamakChat';
-    private static extensionContext: vscode.ExtensionContext | undefined;
-
-    private readonly panel: vscode.WebviewPanel;
-    private readonly extensionUri: vscode.Uri;
-    private chatHistory: ChatMessage[] = [];
-    private disposables: vscode.Disposable[] = [];
-    private currentMode: ChatMode = 'ask';
-    private pendingOperations: FileOperation[] = [];
-    private currentAbortController: AbortController | null = null;
-
-    public static setContext(context: vscode.ExtensionContext): void {
+class ChatPanel {
+    static currentPanel;
+    static viewType = 'tokamakChat';
+    static extensionContext;
+    panel;
+    extensionUri;
+    chatHistory = [];
+    disposables = [];
+    currentMode = 'ask';
+    pendingOperations = [];
+    currentAbortController = null;
+    static setContext(context) {
         ChatPanel.extensionContext = context;
     }
-
-    private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
+    constructor(panel, extensionUri) {
         this.panel = panel;
         this.extensionUri = extensionUri;
-
         // Restore chat history
         this.restoreChatHistory();
-
         this.panel.webview.html = this.getHtmlContent();
-
         this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
-
-        this.panel.webview.onDidReceiveMessage(
-            async (message) => {
-                switch (message.command) {
-                    case 'sendMessage':
-                        await this.handleUserMessage(message.text, message.attachedFiles || []);
-                        break;
-                    case 'insertCode':
-                        await this.insertCodeToEditor(message.code);
-                        break;
-                    case 'selectModel':
-                        await this.handleModelChange(message.model);
-                        break;
-                    case 'selectMode':
-                        this.currentMode = message.mode;
-                        this.saveChatHistory();
-                        this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
-                        break;
-                    case 'ready':
-                        this.updateModelList();
-                        this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
-                        this.sendRestoredHistory();
-                        break;
-                    case 'searchFiles':
-                        await this.searchFiles(message.query);
-                        break;
-                    case 'openFile':
-                        await this.openFile(message.path);
-                        break;
-                    case 'applyOperations':
-                        await this.applyFileOperations();
-                        break;
-                    case 'rejectOperations':
-                        this.pendingOperations = [];
-                        this.panel.webview.postMessage({ command: 'operationsCleared' });
-                        break;
-                    case 'newChat':
-                        this.clearChat();
-                        break;
-                    case 'previewOperation':
-                        await this.previewFileOperation(message.index);
-                        break;
-                    case 'resolveFilePath':
-                        await this.resolveFilePath(message.uri);
-                        break;
-                    case 'runCommand':
-                        await this.runInTerminal(message.command);
-                        break;
-                    case 'searchSlashCommands':
-                        await this.searchSlashCommands(message.query);
-                        break;
-                    case 'stopGeneration':
-                        this.stopGeneration();
-                        break;
-                }
-            },
-            null,
-            this.disposables
-        );
+        this.panel.webview.onDidReceiveMessage(async (message) => {
+            switch (message.command) {
+                case 'sendMessage':
+                    await this.handleUserMessage(message.text, message.attachedFiles || []);
+                    break;
+                case 'insertCode':
+                    await this.insertCodeToEditor(message.code);
+                    break;
+                case 'selectModel':
+                    await this.handleModelChange(message.model);
+                    break;
+                case 'selectMode':
+                    this.currentMode = message.mode;
+                    this.saveChatHistory();
+                    this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
+                    break;
+                case 'ready':
+                    this.updateModelList();
+                    this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
+                    this.sendRestoredHistory();
+                    break;
+                case 'searchFiles':
+                    await this.searchFiles(message.query);
+                    break;
+                case 'openFile':
+                    await this.openFile(message.path);
+                    break;
+                case 'applyOperations':
+                    await this.applyFileOperations();
+                    break;
+                case 'rejectOperations':
+                    this.pendingOperations = [];
+                    this.panel.webview.postMessage({ command: 'operationsCleared' });
+                    break;
+                case 'newChat':
+                    this.clearChat();
+                    break;
+                case 'previewOperation':
+                    await this.previewFileOperation(message.index);
+                    break;
+                case 'resolveFilePath':
+                    await this.resolveFilePath(message.uri);
+                    break;
+                case 'runCommand':
+                    await this.runInTerminal(message.command);
+                    break;
+                case 'searchSlashCommands':
+                    await this.searchSlashCommands(message.query);
+                    break;
+                case 'stopGeneration':
+                    this.stopGeneration();
+                    break;
+            }
+        }, null, this.disposables);
     }
-
-    public static createOrShow(extensionUri: vscode.Uri): void {
+    static createOrShow(extensionUri) {
         const column = vscode.ViewColumn.Beside;
-
         if (ChatPanel.currentPanel) {
             ChatPanel.currentPanel.panel.reveal(column);
             return;
         }
-
-        const panel = vscode.window.createWebviewPanel(
-            ChatPanel.viewType,
-            'Tokamak AI Chat',
-            column,
-            {
-                enableScripts: true,
-                retainContextWhenHidden: true,
-                localResourceRoots: [extensionUri],
-            }
-        );
-
+        const panel = vscode.window.createWebviewPanel(ChatPanel.viewType, 'Tokamak AI Chat', column, {
+            enableScripts: true,
+            retainContextWhenHidden: true,
+            localResourceRoots: [extensionUri],
+        });
         ChatPanel.currentPanel = new ChatPanel(panel, extensionUri);
     }
-
-    public clearChat(): void {
+    clearChat() {
         this.chatHistory = [];
         this.pendingOperations = [];
         this.saveChatHistory();
         this.panel.webview.postMessage({ command: 'clearMessages' });
     }
-
-    private saveChatHistory(): void {
+    saveChatHistory() {
         if (ChatPanel.extensionContext) {
             // Use workspace state for per-project history
             ChatPanel.extensionContext.workspaceState.update('tokamak.chatHistory', this.chatHistory);
             ChatPanel.extensionContext.workspaceState.update('tokamak.chatMode', this.currentMode);
         }
     }
-
-    private restoreChatHistory(): void {
+    restoreChatHistory() {
         if (ChatPanel.extensionContext) {
-            const savedHistory = ChatPanel.extensionContext.workspaceState.get<ChatMessage[]>('tokamak.chatHistory');
-            const savedMode = ChatPanel.extensionContext.workspaceState.get<ChatMode>('tokamak.chatMode');
-
+            const savedHistory = ChatPanel.extensionContext.workspaceState.get('tokamak.chatHistory');
+            const savedMode = ChatPanel.extensionContext.workspaceState.get('tokamak.chatMode');
             if (savedHistory && savedHistory.length > 0) {
                 this.chatHistory = savedHistory;
             }
@@ -202,8 +196,7 @@ export class ChatPanel {
             }
         }
     }
-
-    private sendRestoredHistory(): void {
+    sendRestoredHistory() {
         // Send restored messages to webview
         for (const message of this.chatHistory) {
             if (message.role !== 'system') {
@@ -215,8 +208,7 @@ export class ChatPanel {
             }
         }
     }
-
-    public sendCodeToChat(code: string, filePath: string, languageId: string): void {
+    sendCodeToChat(code, filePath, languageId) {
         this.panel.reveal();
         this.panel.webview.postMessage({
             command: 'receiveCode',
@@ -225,40 +217,30 @@ export class ChatPanel {
             languageId: languageId,
         });
     }
-
-    private updateModelList(): void {
-        const models = getAvailableModels();
-        const selected = getSelectedModel();
+    updateModelList() {
+        const models = (0, settings_js_1.getAvailableModels)();
+        const selected = (0, settings_js_1.getSelectedModel)();
         this.panel.webview.postMessage({
             command: 'updateModels',
             models: models,
             selected: selected,
         });
     }
-
-    private async handleModelChange(model: string): Promise<void> {
-        await setSelectedModel(model);
+    async handleModelChange(model) {
+        await (0, settings_js_1.setSelectedModel)(model);
         vscode.window.showInformationMessage(`Model changed to: ${model}`);
     }
-
-    private async searchFiles(query: string): Promise<void> {
+    async searchFiles(query) {
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (!workspaceFolders) {
             this.panel.webview.postMessage({ command: 'fileSearchResults', files: [] });
             return;
         }
-
         try {
             // Find files matching query
-            const files = await vscode.workspace.findFiles(
-                `**/*${query}*`,
-                '**/node_modules/**',
-                50
-            );
-
-            const results: any[] = [];
-            const processedPaths = new Set<string>();
-
+            const files = await vscode.workspace.findFiles(`**/*${query}*`, '**/node_modules/**', 50);
+            const results = [];
+            const processedPaths = new Set();
             // 1. Add files
             for (const file of files) {
                 const relPath = vscode.workspace.asRelativePath(file);
@@ -269,11 +251,9 @@ export class ChatPanel {
                     isDir: false
                 });
                 processedPaths.add(relPath);
-
                 // 2. Also check if any parent folders match the query
                 let parts = relPath.split('/');
                 parts.pop(); // remove file name
-
                 let currentPath = '';
                 for (const part of parts) {
                     currentPath = currentPath ? `${currentPath}/${part}` : part;
@@ -287,63 +267,58 @@ export class ChatPanel {
                     }
                 }
             }
-
             // Note: results may exceed 50 due to folder additions, so crop
             this.panel.webview.postMessage({ command: 'fileSearchResults', files: results.sort((a, b) => a.path.length - b.path.length).slice(0, 50) });
-        } catch {
+        }
+        catch {
             this.panel.webview.postMessage({ command: 'fileSearchResults', files: [] });
         }
     }
-
-    private async openFile(path: string): Promise<void> {
+    async openFile(path) {
         try {
             const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
             if (workspaceFolder) {
                 const fileUri = vscode.Uri.joinPath(workspaceFolder.uri, path);
                 const stat = await vscode.workspace.fs.stat(fileUri);
-
                 if (stat.type === vscode.FileType.Directory) {
                     await vscode.commands.executeCommand('revealInExplorer', fileUri);
-                } else {
+                }
+                else {
                     await vscode.window.showTextDocument(fileUri);
                 }
             }
-        } catch {
+        }
+        catch {
             vscode.window.showErrorMessage(`Could not open: ${path}`);
         }
     }
-
-    private async resolveFilePath(uriString: string): Promise<void> {
+    async resolveFilePath(uriString) {
         try {
             const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
             if (!workspaceFolder) {
                 return;
             }
-
             let filePath = uriString.trim();
-
             // Handle file:// URI format using VS Code's URI parser
             if (filePath.startsWith('file://')) {
                 const uri = vscode.Uri.parse(filePath);
                 filePath = uri.fsPath;
             }
-
             // Convert to relative path
             const workspacePath = workspaceFolder.uri.fsPath;
             if (filePath.startsWith(workspacePath)) {
                 filePath = filePath.substring(workspacePath.length);
                 // Remove leading slash/backslash
                 filePath = filePath.replace(/^[/\\]+/, '');
-            } else {
+            }
+            else {
                 // File is outside workspace, skip
                 return;
             }
-
             // Skip if path is empty
             if (!filePath) {
                 return;
             }
-
             // Check if file exists
             const fileUri = vscode.Uri.joinPath(workspaceFolder.uri, filePath);
             try {
@@ -358,78 +333,67 @@ export class ChatPanel {
                         isDir: stat.type === vscode.FileType.Directory
                     });
                 }
-            } catch {
+            }
+            catch {
                 // File doesn't exist in workspace
             }
-        } catch (error) {
+        }
+        catch (error) {
             console.error('Error resolving file path:', error);
         }
     }
-
-    private async getFileContent(relativePath: string): Promise<string> {
+    async getFileContent(relativePath) {
         try {
             const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
             if (!workspaceFolder) {
                 return '';
             }
-
             const uri = vscode.Uri.joinPath(workspaceFolder.uri, relativePath);
             const stat = await vscode.workspace.fs.stat(uri);
-
             // If it's a directory, return the structure
             if (stat.type === vscode.FileType.Directory) {
-                const files = await vscode.workspace.findFiles(
-                    new vscode.RelativePattern(uri, '**/*'),
-                    '**/node_modules/**',
-                    100
-                );
-
+                const files = await vscode.workspace.findFiles(new vscode.RelativePattern(uri, '**/*'), '**/node_modules/**', 100);
                 let structure = `\n--- Folder: ${relativePath} ---\nFolder Structure:\n`;
-                const folderTree: string[] = [];
+                const folderTree = [];
                 for (const file of files) {
                     folderTree.push(`- ${vscode.workspace.asRelativePath(file)}`);
                 }
                 structure += folderTree.sort().join('\n') + '\n';
                 return structure;
             }
-
             const document = await vscode.workspace.openTextDocument(uri);
             const content = document.getText();
             const language = document.languageId;
-
             const maxLines = 3000;
             const lines = content.split(/\r?\n/);
             const truncated = lines.length > maxLines;
             const limitedContent = truncated
                 ? lines.slice(0, maxLines).join('\n') + '\n... (truncated)'
                 : content;
-
             return `\n--- File: ${relativePath} (${lines.length} lines) ---\n\`\`\`${language}\n${limitedContent}\n\`\`\`\n`;
-        } catch {
+        }
+        catch {
             return `\n--- Item: ${relativePath} (could not read) ---\n`;
         }
     }
-
-    private getEditorContext(): string {
+    getEditorContext() {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
             return '';
         }
-
         const document = editor.document;
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         const relativePath = workspaceFolder
             ? vscode.workspace.asRelativePath(document.uri)
             : document.fileName;
-
         let context = `\n\n--- Current Editor: ${relativePath} ---\n`;
         context += `Language: ${document.languageId}\n`;
-
         const selection = editor.selection;
         if (!selection.isEmpty) {
             const selectedText = document.getText(selection);
             context += `\nSelected Code (lines ${selection.start.line + 1}-${selection.end.line + 1}):\n\`\`\`${document.languageId}\n${selectedText}\n\`\`\`\n`;
-        } else {
+        }
+        else {
             const cursorLine = selection.active.line;
             const startLine = Math.max(0, cursorLine - 30);
             const endLine = Math.min(document.lineCount - 1, cursorLine + 30);
@@ -437,26 +401,21 @@ export class ChatPanel {
             const visibleCode = document.getText(visibleRange);
             context += `\nCode around cursor (lines ${startLine + 1}-${endLine + 1}):\n\`\`\`${document.languageId}\n${visibleCode}\n\`\`\`\n`;
         }
-
         return context;
     }
-
-    private getWorkspaceInfo(): string {
+    getWorkspaceInfo() {
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (!workspaceFolders || workspaceFolders.length === 0) {
             return '';
         }
-
         const folder = workspaceFolders[0];
         return `\nWorkspace: ${folder.name}`;
     }
-
-    private async getProjectStructure(): Promise<string> {
+    async getProjectStructure() {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (!workspaceFolder) {
             return '';
         }
-
         const excludePatterns = [
             '**/node_modules/**',
             '**/.git/**',
@@ -470,49 +429,39 @@ export class ChatPanel {
             '**/*.pyc',
             '**/.DS_Store',
         ];
-
         try {
-            const files = await vscode.workspace.findFiles(
-                '**/*',
-                `{${excludePatterns.join(',')}}`,
-                2000
-            );
-
+            const files = await vscode.workspace.findFiles('**/*', `{${excludePatterns.join(',')}}`, 2000);
             // Build tree structure
-            const tree: Map<string, Set<string>> = new Map();
+            const tree = new Map();
             tree.set('', new Set());
-
             for (const file of files) {
                 const relativePath = vscode.workspace.asRelativePath(file);
                 const parts = relativePath.split('/');
                 let currentPath = '';
-
                 for (let i = 0; i < parts.length; i++) {
                     const parentPath = currentPath;
                     currentPath = currentPath ? `${currentPath}/${parts[i]}` : parts[i];
-
                     if (!tree.has(parentPath)) {
                         tree.set(parentPath, new Set());
                     }
-                    tree.get(parentPath)!.add(parts[i]);
+                    tree.get(parentPath).add(parts[i]);
                 }
             }
-
             // Generate tree string
-            const buildTreeString = (path: string, indent: string): string => {
+            const buildTreeString = (path, indent) => {
                 const children = tree.get(path);
                 if (!children || children.size === 0) {
                     return '';
                 }
-
                 const sortedChildren = Array.from(children).sort((a, b) => {
                     const aIsDir = tree.has(path ? `${path}/${a}` : a);
                     const bIsDir = tree.has(path ? `${path}/${b}` : b);
-                    if (aIsDir && !bIsDir) return -1;
-                    if (!aIsDir && bIsDir) return 1;
+                    if (aIsDir && !bIsDir)
+                        return -1;
+                    if (!aIsDir && bIsDir)
+                        return 1;
                     return a.localeCompare(b);
                 });
-
                 let result = '';
                 for (let i = 0; i < sortedChildren.length; i++) {
                     const child = sortedChildren[i];
@@ -521,30 +470,26 @@ export class ChatPanel {
                     const isLast = i === sortedChildren.length - 1;
                     const prefix = isLast ? '└── ' : '├── ';
                     const childIndent = indent + (isLast ? '    ' : '│   ');
-
                     result += `${indent}${prefix}${child}${isDir ? '/' : ''}\n`;
-
                     if (isDir) {
                         result += buildTreeString(childPath, childIndent);
                     }
                 }
                 return result;
             };
-
             const treeString = buildTreeString('', '');
             if (treeString) {
                 return `\n--- Project Structure ---\n\`\`\`\n${workspaceFolder.name}/\n${treeString}\`\`\`\n`;
             }
             return '\n(Note: Project structure is too large or too many files to show. Use "read" to explore specific files.)\n';
-        } catch (error) {
+        }
+        catch (error) {
             return `\n(Note: Could not retrieve project structure automatically. Please ask me to read specific files.)\n`;
         }
     }
-
-    private async getSystemPromptForMode(): Promise<string> {
+    async getSystemPromptForMode() {
         const workspaceInfo = this.getWorkspaceInfo();
         const projectStructure = await this.getProjectStructure();
-
         switch (this.currentMode) {
             case 'ask':
                 return `You are a helpful coding assistant integrated with VS Code.${workspaceInfo}
@@ -561,7 +506,6 @@ DESCRIPTION: reason
 <<<END_OPERATION>>>
 - I will automatically provide the content in the next turn.
 - Be concise and helpful.`;
-
             case 'plan':
                 return `You are a software architect integrated with VS Code.${workspaceInfo}
 
@@ -582,7 +526,6 @@ Format your response as:
 3. Files to modify/create
 4. Potential challenges
 5. Testing considerations`;
-
             case 'agent':
                 return `You are an autonomous coding agent integrated with VS Code.${workspaceInfo}
 ${projectStructure}
@@ -624,28 +567,23 @@ export function helper() {
 }
 \`\`\`
 <<<END_OPERATION>>>`;
-
             default:
                 return '';
         }
     }
-
-    private parseFileOperations(response: string): FileOperation[] {
-        const operations: FileOperation[] = [];
+    parseFileOperations(response) {
+        const operations = [];
         const regex = /<<<FILE_OPERATION>>>([\s\S]*?)<<<END_OPERATION>>>/g;
         let match;
-
         while ((match = regex.exec(response)) !== null) {
             const block = match[1];
             const typeMatch = block.match(/TYPE:\s*(create|edit|delete|read)/i);
             const pathMatch = block.match(/PATH:\s*(.+)/i);
             const descMatch = block.match(/DESCRIPTION:\s*(.+)/i);
-
             // Flexible CONTENT parsing: matches content even if trailing backticks are missing or incomplete
             const contentMatch = block.match(/CONTENT:\s*```[\w]*\n?([\s\S]*?)(?:```|$)/i);
-
             if (typeMatch && pathMatch) {
-                const type = typeMatch[1].toLowerCase() as 'create' | 'edit' | 'delete' | 'read';
+                const type = typeMatch[1].toLowerCase();
                 operations.push({
                     type: type,
                     path: pathMatch[1].trim(),
@@ -654,24 +592,19 @@ export function helper() {
                 });
             }
         }
-
         return operations;
     }
-
-    private async applyFileOperations(): Promise<void> {
+    async applyFileOperations() {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (!workspaceFolder) {
             vscode.window.showErrorMessage('No workspace folder open');
             return;
         }
-
         let successCount = 0;
         let errorCount = 0;
-
         for (const op of this.pendingOperations) {
             try {
                 const fileUri = vscode.Uri.joinPath(workspaceFolder.uri, op.path);
-
                 switch (op.type) {
                     case 'create':
                     case 'edit':
@@ -682,7 +615,8 @@ export function helper() {
                                 const dirUri = vscode.Uri.joinPath(workspaceFolder.uri, dirPath);
                                 try {
                                     await vscode.workspace.fs.createDirectory(dirUri);
-                                } catch {
+                                }
+                                catch {
                                     // Directory might already exist
                                 }
                             }
@@ -695,15 +629,14 @@ export function helper() {
                         successCount++;
                         break;
                 }
-            } catch (error) {
+            }
+            catch (error) {
                 errorCount++;
                 console.error(`Failed to ${op.type} ${op.path}:`, error);
             }
         }
-
         this.pendingOperations = [];
         this.panel.webview.postMessage({ command: 'operationsCleared' });
-
         if (successCount > 0) {
             vscode.window.showInformationMessage(`Applied ${successCount} file operation(s)`);
         }
@@ -711,83 +644,60 @@ export function helper() {
             vscode.window.showErrorMessage(`Failed to apply ${errorCount} operation(s)`);
         }
     }
-
-    private async previewFileOperation(index: number): Promise<void> {
+    async previewFileOperation(index) {
         const operation = this.pendingOperations[index];
         if (!operation) {
             return;
         }
-
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (!workspaceFolder) {
             vscode.window.showErrorMessage('No workspace folder open');
             return;
         }
-
         const fileUri = vscode.Uri.joinPath(workspaceFolder.uri, operation.path);
-
         try {
             if (operation.type === 'create') {
                 // Show proposed content vs empty
                 const emptyUri = vscode.Uri.parse(`untitled:empty`);
                 const proposedUri = vscode.Uri.parse(`tokamak-preview:${operation.path}`);
-
                 // Register content provider for the preview
                 const proposedContent = operation.content || '';
-
-                const provider = new (class implements vscode.TextDocumentContentProvider {
-                    provideTextDocumentContent(): string {
+                const provider = new (class {
+                    provideTextDocumentContent() {
                         return proposedContent;
                     }
                 })();
-
                 const disposable = vscode.workspace.registerTextDocumentContentProvider('tokamak-preview', provider);
-
-                await vscode.commands.executeCommand(
-                    'vscode.diff',
-                    emptyUri,
-                    proposedUri,
-                    `[CREATE] ${operation.path}`
-                );
-
+                await vscode.commands.executeCommand('vscode.diff', emptyUri, proposedUri, `[CREATE] ${operation.path}`);
                 // Clean up after a delay
                 setTimeout(() => disposable.dispose(), 5000);
-
-            } else if (operation.type === 'edit') {
+            }
+            else if (operation.type === 'edit') {
                 // Show diff between current and proposed
                 const proposedContent = operation.content || '';
-
-                const provider = new (class implements vscode.TextDocumentContentProvider {
-                    provideTextDocumentContent(): string {
+                const provider = new (class {
+                    provideTextDocumentContent() {
                         return proposedContent;
                     }
                 })();
-
                 const disposable = vscode.workspace.registerTextDocumentContentProvider('tokamak-preview', provider);
                 const proposedUri = vscode.Uri.parse(`tokamak-preview:${operation.path}`);
-
-                await vscode.commands.executeCommand(
-                    'vscode.diff',
-                    fileUri,
-                    proposedUri,
-                    `[EDIT] ${operation.path}`
-                );
-
+                await vscode.commands.executeCommand('vscode.diff', fileUri, proposedUri, `[EDIT] ${operation.path}`);
                 setTimeout(() => disposable.dispose(), 5000);
-
-            } else if (operation.type === 'delete') {
+            }
+            else if (operation.type === 'delete') {
                 // Show current content (will be deleted)
                 await vscode.window.showTextDocument(fileUri, { preview: true });
                 vscode.window.showWarningMessage(`This file will be deleted: ${operation.path}`);
             }
-        } catch (error) {
+        }
+        catch (error) {
             vscode.window.showErrorMessage(`Could not preview: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
     }
-
-    private async handleUserMessage(text: string, attachedFiles: string[]): Promise<void> {
-        if (!(await isConfigured())) {
-            const configured = await promptForConfiguration();
+    async handleUserMessage(text, attachedFiles) {
+        if (!(await (0, settings_js_1.isConfigured)())) {
+            const configured = await (0, settings_js_1.promptForConfiguration)();
             if (!configured) {
                 this.panel.webview.postMessage({
                     command: 'addMessage',
@@ -797,13 +707,11 @@ export function helper() {
                 return;
             }
         }
-
         // Cancel previous request if exists
         if (this.currentAbortController) {
             this.currentAbortController.abort();
             this.currentAbortController = null;
         }
-
         // Parse slash commands
         const { command: slashCommand, remainingText } = await this.parseSlashCommand(text);
         let processedText = text;
@@ -812,71 +720,53 @@ export function helper() {
                 ? `${slashCommand.prompt}\n\nAdditional context: ${remainingText}`
                 : slashCommand.prompt;
         }
-
         let fileContexts = '';
         for (const filePath of attachedFiles) {
             fileContexts += await this.getFileContent(filePath);
         }
-
         const editorContext = attachedFiles.length === 0 ? this.getEditorContext() : '';
         const userMessageWithContext = `${processedText}${fileContexts}${editorContext}`;
-
         this.chatHistory.push({ role: 'user', content: userMessageWithContext });
-
         const displayText = attachedFiles.length > 0
             ? `${text}\n\n📎 ${attachedFiles.join(', ')}`
             : text;
-
         // Send user message to UI
         this.panel.webview.postMessage({ command: 'addMessage', role: 'user', content: displayText });
-
         // Start streaming indicator
         this.panel.webview.postMessage({ command: 'startStreaming' });
-
         // Create AbortController for this request (capture as local variable!)
         const abortController = new AbortController();
         this.currentAbortController = abortController;
         const signal = abortController.signal;
-
         try {
             let loopCount = 0;
             const maxLoops = 10;
             let needsMoreContext = true;
-
-            const systemMessage: ChatMessage = {
+            const systemMessage = {
                 role: 'system',
                 content: await this.getSystemPromptForMode(),
             };
-
             while (needsMoreContext && loopCount < maxLoops) {
                 loopCount++;
                 let fullResponse = '';
-
-                for await (const chunk of streamChatCompletion(
-                    [systemMessage, ...this.chatHistory],
-                    signal
-                )) {
+                for await (const chunk of (0, client_js_1.streamChatCompletion)([systemMessage, ...this.chatHistory], signal)) {
                     if (signal.aborted) {
                         break;
                     }
                     fullResponse += chunk;
                     this.panel.webview.postMessage({ command: 'streamChunk', content: chunk });
                 }
-
-                if (signal.aborted) break;
-
+                if (signal.aborted)
+                    break;
                 this.chatHistory.push({ role: 'assistant', content: fullResponse });
                 needsMoreContext = false;
-
                 // In agent or ask mode, parse file operations
                 const operations = this.parseFileOperations(fullResponse);
-
                 // Handle READ operations automatically
                 const readOps = operations.filter(op => op.type === 'read');
                 if (readOps.length > 0) {
                     needsMoreContext = true;
                     let readResults = '\n--- Auto-read Files Context ---\n';
-
                     for (const op of readOps) {
                         this.panel.webview.postMessage({
                             command: 'addMessage',
@@ -886,14 +776,11 @@ export function helper() {
                         const content = await this.getFileContent(op.path);
                         readResults += content;
                     }
-
                     this.chatHistory.push({ role: 'user', content: readResults });
-
                     // Restart streaming indicator for next turn
                     this.panel.webview.postMessage({ command: 'startStreaming' });
                     continue;
                 }
-
                 // Handle other operations (create/edit/delete) via UI
                 const writeOps = operations.filter(op => op.type !== 'read');
                 if (writeOps.length > 0 && this.currentMode === 'agent') {
@@ -907,73 +794,78 @@ export function helper() {
                         })),
                     });
                 }
-
                 this.saveChatHistory();
                 this.panel.webview.postMessage({ command: 'endStreaming' });
             }
-        } catch (error) {
+        }
+        catch (error) {
             this.panel.webview.postMessage({ command: 'endStreaming' });
-
             // Handle different error types
             if (error instanceof Error) {
                 if (error.name === 'AbortError' || error.message.includes('aborted')) {
                     // User cancelled - do nothing or show cancelled message
-                } else if (error.message.includes('401') || error.message.includes('Unauthorized')) {
+                }
+                else if (error.message.includes('401') || error.message.includes('Unauthorized')) {
                     this.panel.webview.postMessage({
                         command: 'addMessage',
                         role: 'assistant',
                         content: '🔑 **API Key 오류**\n\nAPI Key가 유효하지 않습니다.\n\n[설정 열기](command:workbench.action.openSettings?%22tokamak%22)에서 `tokamak.apiKey`를 확인해주세요.',
                     });
-                } else if (error.message.includes('404') || error.message.includes('Not Found')) {
+                }
+                else if (error.message.includes('404') || error.message.includes('Not Found')) {
                     this.panel.webview.postMessage({
                         command: 'addMessage',
                         role: 'assistant',
                         content: '🔗 **API 엔드포인트 오류**\n\nAPI URL을 찾을 수 없습니다.\n\n`tokamak.baseUrl` 설정을 확인해주세요.',
                     });
-                } else if (error.message.includes('500') || error.message.includes('Internal')) {
+                }
+                else if (error.message.includes('500') || error.message.includes('Internal')) {
                     this.panel.webview.postMessage({
                         command: 'addMessage',
                         role: 'assistant',
                         content: '⚠️ **서버 오류 (500)**\n\nAI 서버에 문제가 발생했습니다.\n\n잠시 후 다시 시도하거나, 서버 상태를 확인해주세요.\n\n모델명(`tokamak.selectedModel`)이 올바른지도 확인해보세요.',
                     });
-                } else if (error.message.includes('ECONNREFUSED') || error.message.includes('fetch failed') || error.message.includes('network')) {
+                }
+                else if (error.message.includes('ECONNREFUSED') || error.message.includes('fetch failed') || error.message.includes('network')) {
                     this.panel.webview.postMessage({
                         command: 'addMessage',
                         role: 'assistant',
                         content: '🌐 **네트워크 연결 오류**\n\nAI 서버에 연결할 수 없습니다.\n\n- 인터넷 연결을 확인해주세요\n- `tokamak.baseUrl`이 올바른지 확인해주세요\n- VPN이 필요한 경우 연결되어 있는지 확인해주세요',
                     });
-                } else {
+                }
+                else {
                     this.panel.webview.postMessage({
                         command: 'addMessage',
                         role: 'assistant',
                         content: `❌ **오류 발생**\n\n${error.message}\n\n문제가 계속되면 설정을 확인해주세요.`,
                     });
                 }
-            } else {
+            }
+            else {
                 this.panel.webview.postMessage({
                     command: 'addMessage',
                     role: 'assistant',
                     content: '❌ **알 수 없는 오류**가 발생했습니다. 다시 시도해주세요.',
                 });
             }
-        } finally {
+        }
+        finally {
             this.currentAbortController = null;
         }
     }
-
-    private async insertCodeToEditor(code: string): Promise<void> {
+    async insertCodeToEditor(code) {
         const editor = vscode.window.activeTextEditor;
         if (editor) {
             await editor.edit((editBuilder) => {
                 editBuilder.insert(editor.selection.active, code);
             });
             vscode.window.showInformationMessage('Code inserted!');
-        } else {
+        }
+        else {
             vscode.window.showWarningMessage('No active editor to insert code into.');
         }
     }
-
-    private async runInTerminal(command: string): Promise<void> {
+    async runInTerminal(command) {
         // Find existing Tokamak terminal or create new one
         let terminal = vscode.window.terminals.find(t => t.name === 'Tokamak');
         if (!terminal) {
@@ -982,42 +874,34 @@ export function helper() {
         terminal.show();
         terminal.sendText(command);
     }
-
-    private stopGeneration(): void {
+    stopGeneration() {
         if (this.currentAbortController) {
             this.currentAbortController.abort();
             this.currentAbortController = null;
             this.panel.webview.postMessage({ command: 'generationStopped' });
         }
     }
-
-    private async loadSkillsFromFolder(): Promise<SlashCommand[]> {
+    async loadSkillsFromFolder() {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (!workspaceFolder) {
             return [];
         }
-
         const skillsFolder = vscode.Uri.joinPath(workspaceFolder.uri, '.tokamak', 'skills');
-        const skills: SlashCommand[] = [];
-
+        const skills = [];
         try {
             const files = await vscode.workspace.fs.readDirectory(skillsFolder);
-
             for (const [fileName, fileType] of files) {
                 if (fileType === vscode.FileType.File && fileName.endsWith('.md')) {
                     const filePath = vscode.Uri.joinPath(skillsFolder, fileName);
                     try {
                         const content = await vscode.workspace.fs.readFile(filePath);
                         const text = Buffer.from(content).toString('utf8');
-
                         // 파일명에서 명령어 이름 추출 (예: explain.md → /explain)
                         const commandName = '/' + fileName.replace('.md', '');
-
                         // 첫 줄을 description으로, 나머지를 prompt로 사용
                         const lines = text.split('\n');
                         let description = commandName;
                         let prompt = text;
-
                         // YAML frontmatter 파싱 (---로 시작하는 경우)
                         if (lines[0].trim() === '---') {
                             const endIndex = lines.findIndex((line, idx) => idx > 0 && line.trim() === '---');
@@ -1029,56 +913,49 @@ export function helper() {
                                 }
                                 prompt = lines.slice(endIndex + 1).join('\n').trim();
                             }
-                        } else if (lines[0].startsWith('#')) {
+                        }
+                        else if (lines[0].startsWith('#')) {
                             // 첫 줄이 # 제목이면 description으로 사용
                             description = lines[0].replace(/^#+\s*/, '').trim();
                             prompt = lines.slice(1).join('\n').trim();
                         }
-
                         skills.push({
                             name: commandName,
                             description,
                             prompt,
                             isBuiltin: false,
                         });
-                    } catch {
+                    }
+                    catch {
                         // 파일 읽기 실패 무시
                     }
                 }
             }
-        } catch {
+        }
+        catch {
             // 폴더가 없으면 빈 배열 반환
         }
-
         return skills;
     }
-
-    private async getAllSkills(): Promise<SlashCommand[]> {
+    async getAllSkills() {
         const fileSkills = await this.loadSkillsFromFolder();
-
         // 파일 스킬이 우선, 같은 이름의 내장 스킬은 덮어씀
         const fileSkillNames = new Set(fileSkills.map(s => s.name));
         const builtinSkills = BUILTIN_SKILLS.filter(s => !fileSkillNames.has(s.name));
-
         return [...fileSkills, ...builtinSkills];
     }
-
-    private async searchSlashCommands(query: string): Promise<void> {
+    async searchSlashCommands(query) {
         const allSkills = await this.getAllSkills();
-        const filtered = allSkills.filter(cmd =>
-            cmd.name.toLowerCase().includes(query.toLowerCase()) ||
-            cmd.description.toLowerCase().includes(query.toLowerCase())
-        );
+        const filtered = allSkills.filter(cmd => cmd.name.toLowerCase().includes(query.toLowerCase()) ||
+            cmd.description.toLowerCase().includes(query.toLowerCase()));
         this.panel.webview.postMessage({
             command: 'slashCommandResults',
             commands: filtered,
         });
     }
-
-    private async parseSlashCommand(text: string): Promise<{ command: SlashCommand | null; remainingText: string }> {
+    async parseSlashCommand(text) {
         const trimmed = text.trim();
         const allSkills = await this.getAllSkills();
-
         for (const cmd of allSkills) {
             if (trimmed.startsWith(cmd.name + ' ') || trimmed === cmd.name) {
                 const remainingText = trimmed.substring(cmd.name.length).trim();
@@ -1087,8 +964,7 @@ export function helper() {
         }
         return { command: null, remainingText: text };
     }
-
-    public dispose(): void {
+    dispose() {
         ChatPanel.currentPanel = undefined;
         this.panel.dispose();
         while (this.disposables.length) {
@@ -1098,8 +974,7 @@ export function helper() {
             }
         }
     }
-
-    private getHtmlContent(): string {
+    getHtmlContent() {
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2129,3 +2004,5 @@ export function helper() {
 </html>`;
     }
 }
+exports.ChatPanel = ChatPanel;
+//# sourceMappingURL=chatPanel.js.map
