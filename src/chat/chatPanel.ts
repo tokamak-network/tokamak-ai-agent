@@ -112,7 +112,7 @@ export class ChatPanel {
     private async handleMessage(message: any): Promise<void> {
         switch (message.command) {
             case 'sendMessage':
-                await this.handleUserMessage(message.text, message.attachedFiles || []);
+                await this.handleUserMessage(message.text, message.attachedFiles || [], message.attachedImages || []);
                 break;
             case 'insertCode':
                 await this.insertCodeToEditor(message.code);
@@ -255,7 +255,14 @@ export class ChatPanel {
             let title = 'New Conversation';
             const firstUserMessage = this.chatHistory.find(m => m.role === 'user');
             if (firstUserMessage) {
-                title = firstUserMessage.content.split('\n')[0].substring(0, 30) + (firstUserMessage.content.length > 30 ? '...' : '');
+                let content = '';
+                if (typeof firstUserMessage.content === 'string') {
+                    content = firstUserMessage.content;
+                } else if (Array.isArray(firstUserMessage.content)) {
+                    const textPart = firstUserMessage.content.find((p: any) => p.type === 'text');
+                    content = textPart ? textPart.text : '';
+                }
+                title = content.split('\n')[0].substring(0, 30) + (content.length > 30 ? '...' : '');
             }
 
             const session: ChatSession = {
@@ -885,7 +892,7 @@ export function helper() {
         }
     }
 
-    private async handleUserMessage(text: string, attachedFiles: string[]): Promise<void> {
+    private async handleUserMessage(text: string, attachedFiles: string[], attachedImages: string[] = []): Promise<void> {
         if (!(await isConfigured())) {
             const configured = await promptForConfiguration();
             if (!configured) {
@@ -918,13 +925,25 @@ export function helper() {
             fileContexts += await this.getFileContent(filePath);
         }
 
-        const editorContext = attachedFiles.length === 0 ? this.getEditorContext() : '';
+        const editorContext = (attachedFiles.length === 0 && attachedImages.length === 0) ? this.getEditorContext() : '';
         const userMessageWithContext = `${processedText}${fileContexts}${editorContext}`;
 
-        this.chatHistory.push({ role: 'user', content: userMessageWithContext });
+        // Create multimodal content if images are present
+        let content: string | any[] = userMessageWithContext;
+        if (attachedImages.length > 0) {
+            content = [
+                { type: 'text', text: userMessageWithContext },
+                ...attachedImages.map(img => ({
+                    type: 'image_url',
+                    image_url: { url: img }
+                }))
+            ];
+        }
 
-        const displayText = attachedFiles.length > 0
-            ? `${text}\n\n📎 ${attachedFiles.join(', ')}`
+        this.chatHistory.push({ role: 'user', content: content });
+
+        const displayText = (attachedFiles.length > 0 || attachedImages.length > 0)
+            ? `${text}${attachedFiles.length > 0 ? `\n\n📎 ${attachedFiles.join(', ')}` : ''}${attachedImages.length > 0 ? `\n\n🖼️ ${attachedImages.length} images attached (pasted)` : ''}`
             : text;
 
         // Send user message to UI
@@ -1404,6 +1423,35 @@ export function helper() {
         .file-tag .remove-btn:hover {
             opacity: 1;
         }
+        .image-tag {
+            display: inline-flex;
+            position: relative;
+            border: 1px solid var(--vscode-widget-border);
+            border-radius: 4px;
+            overflow: hidden;
+            background: var(--vscode-editor-background);
+        }
+        .image-tag img {
+            max-width: 80px;
+            max-height: 80px;
+            display: block;
+            object-fit: cover;
+        }
+        .image-tag .remove-img {
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            background: rgba(0,0,0,0.6);
+            color: white;
+            border-radius: 50%;
+            width: 16px;
+            height: 16px;
+            font-size: 10px;
+            text-align: center;
+            line-height: 16px;
+            cursor: pointer;
+            z-index: 10;
+        }
         .file-tag .file-name {
             cursor: pointer;
         }
@@ -1835,6 +1883,24 @@ export function helper() {
         let mentionStartIndex = -1;
         let slashStartIndex = -1;
         let currentMode = 'ask';
+        let attachedImages = []; // Array of base64 strings
+
+        function addImageTag(base64Data) {
+            const tag = document.createElement('div');
+            tag.className = 'image-tag';
+            tag.innerHTML = '<img src="' + base64Data + '"><span class="remove-img">×</span>';
+            
+            tag.querySelector('.remove-img').onclick = () => {
+                const index = attachedImages.indexOf(base64Data);
+                if (index > -1) {
+                    attachedImages.splice(index, 1);
+                }
+                tag.remove();
+            };
+            
+            attachedFilesContainer.appendChild(tag);
+            attachedImages.push(base64Data);
+        }
 
         const modeDescriptions = {
             ask: 'Ask questions about your code',
@@ -1875,7 +1941,7 @@ export function helper() {
 
         function addMessage(role, content) {
             const messageDiv = document.createElement('div');
-            messageDiv.className = \`message \${role}\`;
+            messageDiv.className = 'message ' + role;
 
             const roleDiv = document.createElement('div');
             roleDiv.className = 'message-role';
@@ -1883,7 +1949,44 @@ export function helper() {
 
             const contentDiv = document.createElement('div');
             contentDiv.className = 'message-content';
-            contentDiv.innerHTML = parseMarkdown(content);
+            
+            let textContent = '';
+            let images = [];
+            
+            if (typeof content === 'string') {
+                textContent = content;
+            } else if (Array.isArray(content)) {
+                content.forEach(item => {
+                    if (item.type === 'text') {
+                        textContent += item.text;
+                    } else if (item.type === 'image_url') {
+                        images.push(item.image_url.url);
+                    }
+                });
+            }
+            
+            contentDiv.innerHTML = parseMarkdown(textContent);
+            
+            if (images.length > 0) {
+                const imagesDiv = document.createElement('div');
+                imagesDiv.className = 'message-images';
+                imagesDiv.style.display = 'flex';
+                imagesDiv.style.flexWrap = 'wrap';
+                imagesDiv.style.gap = '8px';
+                imagesDiv.style.marginTop = '8px';
+                
+                images.forEach(src => {
+                    const img = document.createElement('img');
+                    img.src = src;
+                    img.style.maxWidth = '100%';
+                    img.style.maxHeight = '200px';
+                    img.style.borderRadius = '4px';
+                    img.style.cursor = 'pointer';
+                    img.onclick = () => window.open(src);
+                    imagesDiv.appendChild(img);
+                });
+                contentDiv.appendChild(imagesDiv);
+            }
 
             messageDiv.appendChild(roleDiv);
             messageDiv.appendChild(contentDiv);
@@ -2092,26 +2195,33 @@ export function helper() {
 
         let isSending = false;
         function sendMessage() {
-            if (isSending) return; // Prevent duplicate calls
+            if (isSending) return;
             
             const text = messageInput.value.trim();
-            if (!text && attachedFiles.length === 0) return;
+            if (!text && attachedFiles.length === 0 && attachedImages.length === 0) return;
 
             isSending = true;
             sendBtn.disabled = true;
+
             vscode.postMessage({
                 command: 'sendMessage',
                 text: text,
-                attachedFiles: attachedFiles.map(f => f.path)
+                attachedFiles: attachedFiles,
+                attachedImages: attachedImages
             });
+
             messageInput.value = '';
             messageInput.style.height = 'auto';
             attachedFiles = [];
+            attachedImages = [];
             attachedFilesContainer.innerHTML = '';
             hideAutocomplete();
-            
+
             // Reset flag after a short delay
-            setTimeout(() => { isSending = false; }, 100);
+            setTimeout(() => { 
+                isSending = false;
+                sendBtn.disabled = false;
+            }, 100);
         }
 
         function updateModels(models, selected) {
@@ -2294,6 +2404,20 @@ export function helper() {
             }
 
             hideAutocomplete();
+        });
+
+        messageInput.addEventListener('paste', (e) => {
+            const items = e.clipboardData.items;
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image') !== -1) {
+                    const blob = items[i].getAsFile();
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                        addImageTag(event.target.result);
+                    };
+                    reader.readAsDataURL(blob);
+                }
+            }
         });
 
         window.addEventListener('message', (event) => {

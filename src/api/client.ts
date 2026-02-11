@@ -36,7 +36,7 @@ export function resetClient(): void {
 
 export interface ChatMessage {
     role: 'system' | 'user' | 'assistant';
-    content: string;
+    content: string | any[];
 }
 
 export async function chatCompletion(messages: ChatMessage[]): Promise<string> {
