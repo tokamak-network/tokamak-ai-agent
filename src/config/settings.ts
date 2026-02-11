@@ -9,6 +9,10 @@ export interface TokamakSettings {
     completionDebounceMs: number;
 }
 
+export function setSettingsContext(context: vscode.ExtensionContext): void {
+    // Keep for potential future use or consistency
+}
+
 export function getSettings(): TokamakSettings {
     const config = vscode.workspace.getConfiguration('tokamak');
     return {

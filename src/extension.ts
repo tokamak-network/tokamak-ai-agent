@@ -3,11 +3,13 @@ import { ChatPanel } from './chat/chatPanel.js';
 import { InlineCompletionProvider } from './completion/inlineCompletionProvider.js';
 import { explainCode, refactorCode, disposeOutputChannel } from './codeActions/codeActionProvider.js';
 import { resetClient } from './api/client.js';
+import { setSettingsContext } from './config/settings.js';
 
 export function activate(context: vscode.ExtensionContext): void {
     console.log('Tokamak AI Agent is now active!');
 
-    // Set context for ChatPanel to enable history persistence
+    // Set context for settings and ChatPanel
+    setSettingsContext(context);
     ChatPanel.setContext(context);
 
     // Register Inline Completion Provider

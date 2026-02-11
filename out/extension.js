@@ -13043,6 +13043,8 @@ var openai_default = OpenAI;
 
 // src/config/settings.ts
 var vscode = __toESM(require("vscode"));
+function setSettingsContext(context) {
+}
 function getSettings() {
   const config = vscode.workspace.getConfiguration("tokamak");
   return {
@@ -13615,6 +13617,7 @@ ${treeString}\`\`\`
 ${projectStructure}
 The user may attach files using @filename - their contents will be included in the message.
 - Analyze all provided code context to give relevant answers
+- If you need to see the content of a file not provided, you can use the FILE_OPERATION with TYPE: read
 - When providing code, wrap it in markdown code blocks with the appropriate language identifier
 - Be concise and helpful
 - Reference specific files and line numbers when discussing code`;
@@ -13644,7 +13647,7 @@ ${projectStructure}
 You can perform file operations. When you need to create, edit, or delete files, output them in this EXACT format:
 
 <<<FILE_OPERATION>>>
-TYPE: create|edit|delete
+TYPE: create|edit|delete|read
 PATH: relative/path/to/file
 DESCRIPTION: Brief description of the change
 CONTENT:
@@ -13656,6 +13659,7 @@ actual file content here (for create/edit only)
 Rules:
 - You can output multiple FILE_OPERATION blocks
 - For 'edit', provide the COMPLETE new file content
+- For 'read', provide the PATH only, and I will show you the content in the next turn
 - For 'delete', no CONTENT is needed
 - Always explain what you're doing before the operations
 - After operations, summarize what was done
@@ -13686,13 +13690,14 @@ export function helper() {
     let match;
     while ((match = regex.exec(response)) !== null) {
       const block = match[1];
-      const typeMatch = block.match(/TYPE:\s*(create|edit|delete)/i);
+      const typeMatch = block.match(/TYPE:\s*(create|edit|delete|read)/i);
       const pathMatch = block.match(/PATH:\s*(.+)/i);
       const descMatch = block.match(/DESCRIPTION:\s*(.+)/i);
       const contentMatch = block.match(/CONTENT:\s*```[\w]*\n([\s\S]*?)```/i);
       if (typeMatch && pathMatch) {
+        const type = typeMatch[1].toLowerCase();
         operations.push({
-          type: typeMatch[1].toLowerCase(),
+          type,
           path: pathMatch[1].trim(),
           description: descMatch ? descMatch[1].trim() : "",
           content: contentMatch ? contentMatch[1] : void 0
@@ -13801,7 +13806,7 @@ export function helper() {
     }
   }
   async handleUserMessage(text, attachedFiles) {
-    if (!isConfigured()) {
+    if (!await isConfigured()) {
       const configured = await promptForConfiguration();
       if (!configured) {
         this.panel.webview.postMessage({
@@ -13839,39 +13844,61 @@ Additional context: ${remainingText}` : slashCommand.prompt;
     this.currentAbortController = abortController;
     const signal = abortController.signal;
     try {
-      let fullResponse = "";
+      let loopCount = 0;
+      const maxLoops = 10;
+      let needsMoreContext = true;
       const systemMessage = {
         role: "system",
         content: await this.getSystemPromptForMode()
       };
-      for await (const chunk of streamChatCompletion(
-        [systemMessage, ...this.chatHistory],
-        signal
-      )) {
-        if (signal.aborted) {
-          break;
+      while (needsMoreContext && loopCount < maxLoops) {
+        loopCount++;
+        let fullResponse = "";
+        for await (const chunk of streamChatCompletion(
+          [systemMessage, ...this.chatHistory],
+          signal
+        )) {
+          if (signal.aborted) {
+            break;
+          }
+          fullResponse += chunk;
+          this.panel.webview.postMessage({ command: "streamChunk", content: chunk });
         }
-        fullResponse += chunk;
-        this.panel.webview.postMessage({ command: "streamChunk", content: chunk });
-      }
-      if (!signal.aborted) {
+        if (signal.aborted) break;
         this.chatHistory.push({ role: "assistant", content: fullResponse });
+        needsMoreContext = false;
+        const operations = this.parseFileOperations(fullResponse);
+        const readOps = operations.filter((op) => op.type === "read");
+        if (readOps.length > 0) {
+          needsMoreContext = true;
+          let readResults = "\n--- Auto-read Files Context ---\n";
+          for (const op of readOps) {
+            this.panel.webview.postMessage({
+              command: "addMessage",
+              role: "assistant",
+              content: `\u{1F50D} *Reading file: ${op.path}*`
+            });
+            const content = await this.getFileContent(op.path);
+            readResults += content;
+          }
+          this.chatHistory.push({ role: "user", content: readResults });
+          this.panel.webview.postMessage({ command: "startStreaming" });
+          continue;
+        }
+        const writeOps = operations.filter((op) => op.type !== "read");
+        if (writeOps.length > 0 && this.currentMode === "agent") {
+          this.pendingOperations = writeOps;
+          this.panel.webview.postMessage({
+            command: "showOperations",
+            operations: writeOps.map((op) => ({
+              type: op.type,
+              path: op.path,
+              description: op.description
+            }))
+          });
+        }
         this.saveChatHistory();
         this.panel.webview.postMessage({ command: "endStreaming" });
-        if (this.currentMode === "agent") {
-          const operations = this.parseFileOperations(fullResponse);
-          if (operations.length > 0) {
-            this.pendingOperations = operations;
-            this.panel.webview.postMessage({
-              command: "showOperations",
-              operations: operations.map((op) => ({
-                type: op.type,
-                path: op.path,
-                description: op.description
-              }))
-            });
-          }
-        }
       }
     } catch (error) {
       this.panel.webview.postMessage({ command: "endStreaming" });
@@ -15327,6 +15354,7 @@ function disposeOutputChannel() {
 // src/extension.ts
 function activate(context) {
   console.log("Tokamak AI Agent is now active!");
+  setSettingsContext(context);
   ChatPanel.setContext(context);
   const inlineCompletionProvider = new InlineCompletionProvider();
   context.subscriptions.push(
