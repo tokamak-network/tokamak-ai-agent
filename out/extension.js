@@ -15204,7 +15204,7 @@ ${error.message}
             vscode.postMessage({
                 command: 'sendMessage',
                 text: text,
-                attachedFiles: attachedFiles,
+                attachedFiles: attachedFiles.map(f => f.path),
                 attachedImages: attachedImages
             });
 
