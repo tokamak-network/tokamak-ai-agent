@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import { streamChatCompletion, ChatMessage } from '../api/client.js';
 import { isConfigured, promptForConfiguration, getAvailableModels, getSelectedModel, setSelectedModel } from '../config/settings.js';
+import { AgentEngine } from '../agent/engine.js';
+import { AgentContext } from '../agent/types.js';
 
 type ChatMode = 'ask' | 'plan' | 'agent';
 
@@ -86,6 +88,7 @@ export class ChatPanel {
     private currentMode: ChatMode = 'ask';
     private pendingOperations: FileOperation[] = [];
     private currentAbortController: AbortController | null = null;
+    private agentEngine: AgentEngine | undefined;
 
     public static setContext(context: vscode.ExtensionContext): void {
         ChatPanel.extensionContext = context;
@@ -107,6 +110,27 @@ export class ChatPanel {
             null,
             this.disposables
         );
+
+        this.initAgentEngine();
+    }
+
+    private initAgentEngine(): void {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        const context: AgentContext = {
+            sessionId: this.currentSessionId || 'default',
+            mode: this.currentMode,
+            history: this.chatHistory,
+            workspacePath: workspaceFolder?.uri.fsPath || '',
+            maxFixAttempts: 3,
+            tokenBudget: 4000,
+            onStateChange: (state) => {
+                this.panel.webview.postMessage({ command: 'agentStateChanged', state });
+            },
+            onPlanChange: (plan) => {
+                this.panel.webview.postMessage({ command: 'updatePlan', plan });
+            }
+        };
+        this.agentEngine = new AgentEngine(context);
     }
 
     private async handleMessage(message: any): Promise<void> {
@@ -707,13 +731,22 @@ actual file content here (for create/edit only)
 <<<END_OPERATION>>>
 
 Rules:
-- You can output multiple FILE_OPERATION blocks
-- For 'edit', provide the COMPLETE new file content.
-- For 'read', provide the PATH only, and I will show you the content in the next turn
-- For 'delete', no CONTENT is needed
-- CRITICAL: Ensure the code is syntactically correct and includes all closing braces (}). NEVER truncate the code at the end.
-- Always explain what you're doing before the operations.
-- After operations, summarize what was done.
+- For 'create', provide the COMPLETE file content.
+- For 'edit', provide one or more SEARCH/REPLACE blocks. DO NOT provide the complete file content unless necessary.
+- For 'read', provide the PATH only, and I will show you the content in the next turn.
+
+SEARCH/REPLACE Block Format:
+<<<<<<< SEARCH
+[exact code to find]
+=======
+[new code to replace with]
+>>>>>>> REPLACE
+
+Rules for SEARCH/REPLACE:
+1. The SEARCH part must EXACTLY match the code in the file, including indentation and spacing.
+2. Provide enough context in the SEARCH block to make it unique.
+3. You can have multiple SEARCH/REPLACE blocks in one CONTENT section.
+4. Always explain what you're doing before the operations.
 - Be careful and precise with file paths.
 - Ask for confirmation if the task is ambiguous.
 
@@ -781,7 +814,6 @@ export function helper() {
 
                 switch (op.type) {
                     case 'create':
-                    case 'edit':
                         if (op.content !== undefined) {
                             // Ensure directory exists
                             const dirPath = op.path.split('/').slice(0, -1).join('/');
@@ -789,14 +821,62 @@ export function helper() {
                                 const dirUri = vscode.Uri.joinPath(workspaceFolder.uri, dirPath);
                                 try {
                                     await vscode.workspace.fs.createDirectory(dirUri);
-                                } catch {
-                                    // Directory might already exist
-                                }
+                                } catch { }
                             }
                             await vscode.workspace.fs.writeFile(fileUri, Buffer.from(op.content, 'utf8'));
                             successCount++;
                         }
                         break;
+
+                    case 'edit':
+                        if (op.content !== undefined) {
+                            try {
+                                const existingData = await vscode.workspace.fs.readFile(fileUri);
+                                let existingContent = Buffer.from(existingData).toString('utf8');
+
+                                // Check if this is a SEARCH/REPLACE edit
+                                if (op.content.includes('<<<<<<< SEARCH')) {
+                                    const blocks = op.content.split('>>>>>>> REPLACE');
+                                    let newContent = existingContent;
+                                    let anyApplied = false;
+
+                                    for (const block of blocks) {
+                                        if (!block.trim()) continue;
+
+                                        const searchParts = block.split('=======');
+                                        if (searchParts.length !== 2) continue;
+
+                                        const searchContent = searchParts[0].split('<<<<<<< SEARCH')[1]?.trim();
+                                        const replaceContent = searchParts[1]?.trim();
+
+                                        if (searchContent !== undefined && replaceContent !== undefined) {
+                                            if (newContent.includes(searchContent)) {
+                                                newContent = newContent.replace(searchContent, replaceContent);
+                                                anyApplied = true;
+                                            } else {
+                                                console.warn(`Search block not found in ${op.path}:\n${searchContent}`);
+                                            }
+                                        }
+                                    }
+
+                                    if (anyApplied) {
+                                        await vscode.workspace.fs.writeFile(fileUri, Buffer.from(newContent, 'utf8'));
+                                        successCount++;
+                                    } else {
+                                        throw new Error(`No search blocks were found in the file: ${op.path}`);
+                                    }
+                                } else {
+                                    // Fallback to full rewrite
+                                    await vscode.workspace.fs.writeFile(fileUri, Buffer.from(op.content, 'utf8'));
+                                    successCount++;
+                                }
+                            } catch (error) {
+                                errorCount++;
+                                vscode.window.showErrorMessage(`Edit failed for ${op.path}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                            }
+                        }
+                        break;
+
                     case 'delete':
                         await vscode.workspace.fs.delete(fileUri);
                         successCount++;
@@ -861,27 +941,50 @@ export function helper() {
                 setTimeout(() => disposable.dispose(), 5000);
 
             } else if (operation.type === 'edit') {
-                // Show diff between current and proposed
-                const proposedContent = operation.content || '';
+                try {
+                    const existingData = await vscode.workspace.fs.readFile(fileUri);
+                    const existingContent = Buffer.from(existingData).toString('utf8');
+                    let proposedContent = operation.content || '';
 
-                const provider = new (class implements vscode.TextDocumentContentProvider {
-                    provideTextDocumentContent(): string {
-                        return proposedContent;
+                    // If SEARCH/REPLACE format, calculate what the final file would look like
+                    if (proposedContent.includes('<<<<<<< SEARCH')) {
+                        const blocks = proposedContent.split('>>>>>>> REPLACE');
+                        let result = existingContent;
+                        for (const block of blocks) {
+                            if (!block.trim()) continue;
+                            const searchParts = block.split('=======');
+                            if (searchParts.length !== 2) continue;
+                            const searchContent = searchParts[0].split('<<<<<<< SEARCH')[1]?.trim();
+                            const replaceContent = searchParts[1]?.trim();
+                            if (searchContent !== undefined && replaceContent !== undefined) {
+                                if (result.includes(searchContent)) {
+                                    result = result.replace(searchContent, replaceContent);
+                                }
+                            }
+                        }
+                        proposedContent = result;
                     }
-                })();
 
-                const disposable = vscode.workspace.registerTextDocumentContentProvider('tokamak-preview', provider);
-                const proposedUri = vscode.Uri.parse(`tokamak-preview:${operation.path}`);
+                    const provider = new (class implements vscode.TextDocumentContentProvider {
+                        provideTextDocumentContent(): string {
+                            return proposedContent;
+                        }
+                    })();
 
-                await vscode.commands.executeCommand(
-                    'vscode.diff',
-                    fileUri,
-                    proposedUri,
-                    `[EDIT] ${operation.path}`
-                );
+                    const disposable = vscode.workspace.registerTextDocumentContentProvider('tokamak-preview', provider);
+                    const proposedUri = vscode.Uri.parse(`tokamak-preview:${operation.path}`);
 
-                setTimeout(() => disposable.dispose(), 5000);
+                    await vscode.commands.executeCommand(
+                        'vscode.diff',
+                        fileUri,
+                        proposedUri,
+                        `[EDIT] ${operation.path}`
+                    );
 
+                    setTimeout(() => disposable.dispose(), 5000);
+                } catch (error) {
+                    vscode.window.showErrorMessage(`Preview failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                }
             } else if (operation.type === 'delete') {
                 // Show current content (will be deleted)
                 await vscode.window.showTextDocument(fileUri, { preview: true });
@@ -986,6 +1089,13 @@ export function helper() {
 
                 this.chatHistory.push({ role: 'assistant', content: fullResponse });
                 needsMoreContext = false;
+
+                // [Phase 1 통합] Plan 모드인 경우 AgentEngine에 전달
+                if (this.currentMode === 'plan' && this.agentEngine) {
+                    await this.agentEngine.setPlanFromResponse(fullResponse);
+                    // 자율 루프 시작 (현재는 플래닝 단계까지만 시뮬레이션)
+                    await this.agentEngine.run();
+                }
 
                 // In agent or ask mode, parse file operations
                 const operations = this.parseFileOperations(fullResponse);
@@ -1790,6 +1900,69 @@ export function helper() {
         #history-btn:hover {
             background: var(--vscode-toolbar-hoverBackground);
         }
+
+        /* Interactive Planner Styles */
+        #plan-panel {
+            display: none;
+            padding: 12px 15px;
+            background-color: var(--vscode-sideBar-background);
+            border-top: 1px solid var(--vscode-widget-border);
+            border-bottom: 1px solid var(--vscode-widget-border);
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        #plan-panel.visible {
+            display: block;
+        }
+        .plan-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .plan-header h4 {
+            margin: 0;
+            font-size: 0.9em;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .agent-status-badge {
+            font-size: 0.75em;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background-color: var(--vscode-badge-background);
+            color: var(--vscode-badge-foreground);
+        }
+        .plan-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            margin-bottom: 6px;
+            font-size: 0.85em;
+            opacity: 0.8;
+        }
+        .plan-item.running {
+            opacity: 1;
+            font-weight: bold;
+            color: var(--vscode-textLink-foreground);
+        }
+        .plan-item.done {
+            opacity: 0.6;
+            text-decoration: line-through;
+        }
+        .plan-item.failed {
+            color: var(--vscode-errorForeground);
+            opacity: 1;
+        }
+        .step-icon {
+            flex-shrink: 0;
+            width: 16px;
+            text-align: center;
+        }
+        .step-desc {
+            flex: 1;
+        }
     </style>
 </head>
 <body>
@@ -1820,6 +1993,13 @@ export function helper() {
     </div>
     <div id="chat-container"></div>
     <div class="typing-indicator" id="typing-indicator">AI is thinking...</div>
+    <div id="plan-panel">
+        <div class="plan-header">
+            <h4>📋 Implementation Plan</h4>
+            <span id="agent-status" class="agent-status-badge">Idle</span>
+        </div>
+        <div id="plan-list"></div>
+    </div>
     <div id="operations-panel">
         <h4>⚡ Pending File Operations</h4>
         <div id="operations-list"></div>
@@ -1871,6 +2051,9 @@ export function helper() {
         const historyList = document.getElementById('history-list');
         const historyOverlay = document.getElementById('history-overlay');
         const closeHistoryBtn = document.getElementById('close-history');
+        const planPanel = document.getElementById('plan-panel');
+        const planList = document.getElementById('plan-list');
+        const agentStatusBadge = document.getElementById('agent-status');
 
         let currentStreamingMessage = null;
         let streamingContent = '';
@@ -2479,78 +2662,117 @@ export function helper() {
                 case 'sessionsList':
                     renderSessions(message.sessions, message.currentSessionId);
                     break;
+                case 'updatePlan':
+                    updatePlanUI(message.plan);
+                    break;
+                case 'agentStateChanged':
+                    updateAgentStatusUI(message.state);
+                    break;
                 case 'generationStopped':
                     endStreaming();
                     break;
             }
         });
 
-        // Drag and drop handling
-        const dropZone = document.getElementById('drop-zone');
-
-        dropZone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            dropZone.classList.add('drag-over');
-        });
-
-        dropZone.addEventListener('dragleave', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            dropZone.classList.remove('drag-over');
-        });
-
-        dropZone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            dropZone.classList.remove('drag-over');
-
-            // Try different data formats
-            const uriList = e.dataTransfer.getData('text/uri-list');
-            const text = e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text');
-
-            // Handle VS Code Explorer drops (uri-list format)
-            if (uriList) {
-                const uris = uriList.split(/[\\r\\n]+/).filter(u => u && !u.startsWith('#'));
-                uris.forEach(uri => {
-                    vscode.postMessage({ command: 'resolveFilePath', uri: uri.trim() });
-                });
+        function updateAgentStatusUI(state) {
+            agentStatusBadge.textContent = state;
+            if (state !== 'Idle' && state !== 'Done' && state !== 'Error') {
+                planPanel.classList.add('visible');
             }
-            // Handle text/plain drops
-            else if (text) {
-                const lines = text.split(/[\\r\\n]+/);
-                lines.forEach(line => {
-                    line = line.trim();
-                    if (line) {
-                        vscode.postMessage({ command: 'resolveFilePath', uri: line });
-                    }
-                });
+        }
+
+        function updatePlanUI(plan) {
+            if (!plan || plan.length === 0) {
+                planPanel.classList.remove('visible');
+                return;
             }
+            
+            planPanel.classList.add('visible');
+            planList.innerHTML = '';
+            
+            plan.forEach(step => {
+                const item = document.createElement('div');
+                item.className = 'plan-item ' + step.status;
+                
+                let icon = '○';
+                if (step.status === 'running') icon = '⚡';
+                if (step.status === 'done') icon = '✓';
+                if (step.status === 'failed') icon = '✗';
+                
+                item.innerHTML = \`
+                    <span class="step-icon">\${icon}</span>
+                    <span class="step-desc">\${escapeHtml(step.description)}</span>
+                \`;
+                planList.appendChild(item);
+            });
+        }
 
-            // Handle dropped files from system
-            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-                Array.from(e.dataTransfer.files).forEach(file => {
-                    if (file.path) {
-                        vscode.postMessage({ command: 'resolveFilePath', uri: file.path });
-                    }
-                });
+// Drag and drop handling
+const dropZone = document.getElementById('drop-zone');
+
+dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropZone.classList.add('drag-over');
+});
+
+dropZone.addEventListener('dragleave', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropZone.classList.remove('drag-over');
+});
+
+dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropZone.classList.remove('drag-over');
+
+    // Try different data formats
+    const uriList = e.dataTransfer.getData('text/uri-list');
+    const text = e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text');
+
+    // Handle VS Code Explorer drops (uri-list format)
+    if (uriList) {
+        const uris = uriList.split(/[\\r\\n]+/).filter(u => u && !u.startsWith('#'));
+        uris.forEach(uri => {
+            vscode.postMessage({ command: 'resolveFilePath', uri: uri.trim() });
+        });
+    }
+    // Handle text/plain drops
+    else if (text) {
+        const lines = text.split(/[\\r\\n]+/);
+        lines.forEach(line => {
+            line = line.trim();
+            if (line) {
+                vscode.postMessage({ command: 'resolveFilePath', uri: line });
             }
         });
+    }
 
-        // Also allow dropping on the whole chat container
-        document.body.addEventListener('dragover', (e) => {
-            e.preventDefault();
+    // Handle dropped files from system
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        Array.from(e.dataTransfer.files).forEach(file => {
+            if (file.path) {
+                vscode.postMessage({ command: 'resolveFilePath', uri: file.path });
+            }
         });
+    }
+});
 
-        document.body.addEventListener('drop', (e) => {
-            e.preventDefault();
-        });
+// Also allow dropping on the whole chat container
+document.body.addEventListener('dragover', (e) => {
+    e.preventDefault();
+});
 
-        window.insertCode = insertCode;
-        window.runCommand = runCommand;
-    })();
-    </script>
-</body>
-</html>`;
+document.body.addEventListener('drop', (e) => {
+    e.preventDefault();
+});
+
+window.insertCode = insertCode;
+window.runCommand = runCommand;
+    }) ();
+</script>
+    </body>
+    </html>`;
     }
 }
