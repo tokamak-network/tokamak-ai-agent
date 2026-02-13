@@ -74,7 +74,7 @@ export class Executor {
         }
     }
 
-    private async readFile(path: string): Promise<string> {
+    public async readFile(path: string): Promise<string> {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (!workspaceFolder) throw new Error('No workspace folder open');
 

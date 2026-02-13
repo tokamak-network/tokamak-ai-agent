@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { AgentState, AgentContext, PlanStep, StepStatus } from './types.js';
 import { Planner } from './planner.js';
 import { Executor } from './executor.js';
+import { Observer, DiagnosticInfo } from './observer.js';
 import { streamChatCompletion, ChatMessage } from '../api/client.js';
 
 export class AgentEngine {
@@ -12,6 +13,8 @@ export class AgentEngine {
     private fixAttempts: Map<string, number> = new Map();
     private planner: Planner = new Planner();
     private executor: Executor = new Executor();
+    private observer: Observer = new Observer();
+    private lastDiagnostics: DiagnosticInfo[] = [];
 
     constructor(context: AgentContext) {
         this.context = context;
@@ -184,9 +187,25 @@ export class AgentEngine {
     }
 
     private async handleObservation(): Promise<void> {
-        // [Phase 3에서 고도화] Diagnostics 및 터미널 결과 확인 로직이 들어갈 자리
-        // 현재는 단순히 다음 단계 실행을 위해 Executing으로 복귀
-        await this.transitionTo('Executing');
+        console.log('[AgentEngine] Observing results...');
+
+        // 현재 작업 중인 파일 및 연관 파일의 에러 체크
+        this.lastDiagnostics = await this.observer.getDiagnostics();
+        const errors = this.lastDiagnostics.filter(d => d.severity === 'Error');
+
+        if (errors.length > 0) {
+            console.warn(`[AgentEngine] Errors detected after execution: ${errors.length}`);
+            const step = this.plan[this.currentStepIndex];
+            if (step) {
+                step.status = 'failed';
+                step.result = this.observer.formatDiagnostics(errors);
+                this.notifyPlanChange();
+            }
+            await this.transitionTo('Fixing');
+        } else {
+            console.log('[AgentEngine] No errors detected. Proceeding...');
+            await this.transitionTo('Executing');
+        }
     }
 
     private async handleReflection(): Promise<void> {
@@ -209,8 +228,44 @@ export class AgentEngine {
         }
 
         this.fixAttempts.set(step.id, attemptCount + 1);
-        // TODO: AI에게 수정을 맡기는 로직
-        await this.transitionTo('Executing');
+
+        console.log(`[AgentEngine] Attempting auto-fix (Attempt ${attemptCount + 1}) for step: ${step.id}`);
+
+        const errorContext = this.observer.formatDiagnostics(this.lastDiagnostics);
+        const prompt = `
+            작업 중 다음과 같은 에러가 발생했습니다:
+            ${errorContext}
+
+            이 에러를 수정하기 위해 코드를 어떻게 고쳐야 할까요? 
+            반드시 다음과 같은 JSON 형식의 Action으로 응답해주세요:
+            { "type": "write", "payload": { "path": "에러가난파일경로", "content": "수정된전체코드(또는 Search/Replace 블록)" } }
+        `;
+
+        try {
+            // AI 호출 (이전 히스토리와 현재 에러 상황 전달)
+            let aiResponse = '';
+            const stream = streamChatCompletion([{ role: 'user', content: prompt }]);
+            for await (const chunk of stream) {
+                aiResponse += chunk;
+            }
+
+            // AI 응답에서 JSON Action 추출
+            const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                const action = JSON.parse(jsonMatch[0]);
+                const result = await this.executor.execute(action);
+                step.result = `[Auto-Fix Attempt ${attemptCount + 1}] ${result}`;
+            } else {
+                step.result = `[Auto-Fix Attempt ${attemptCount + 1}] AI failed to provide a valid action.`;
+            }
+
+            // 수정 후 다시 검증을 위해 Observing으로 전이
+            await this.transitionTo('Observing');
+        } catch (error) {
+            console.error('[AgentEngine] Auto-fix failed:', error);
+            step.result = `[Auto-Fix Attempt ${attemptCount + 1}] Error: ${error instanceof Error ? error.message : 'Unknown error'}`;
+            await this.transitionTo('Error');
+        }
     }
 
     public stop(): void {
