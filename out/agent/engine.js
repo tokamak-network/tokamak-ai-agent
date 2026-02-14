@@ -1,75 +1,66 @@
-import * as vscode from 'vscode';
-import { AgentState, AgentContext, PlanStep } from './types.js';
-import { Planner } from './planner.js';
-import { Executor } from './executor.js';
-import { Observer, DiagnosticInfo } from './observer.js';
-import { Searcher } from './searcher.js';
-import { ContextManager } from './contextManager.js';
-import { streamChatCompletion } from '../api/client.js';
-
-export class AgentEngine {
-    private state: AgentState = 'Idle';
-    private plan: PlanStep[] = [];
-    private context: AgentContext;
-    private currentStepIndex: number = -1;
-    private fixAttempts: Map<string, number> = new Map();
-    private planner: Planner = new Planner();
-    private executor: Executor = new Executor();
-    private observer: Observer = new Observer();
-    private searcher: Searcher = new Searcher();
-    private contextManager: ContextManager;
-    private lastDiagnostics: DiagnosticInfo[] = [];
-
-    constructor(context: AgentContext) {
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.AgentEngine = void 0;
+const planner_js_1 = require("./planner.js");
+const executor_js_1 = require("./executor.js");
+const observer_js_1 = require("./observer.js");
+const searcher_js_1 = require("./searcher.js");
+const contextManager_js_1 = require("./contextManager.js");
+const client_js_1 = require("../api/client.js");
+class AgentEngine {
+    state = 'Idle';
+    plan = [];
+    context;
+    currentStepIndex = -1;
+    fixAttempts = new Map();
+    planner = new planner_js_1.Planner();
+    executor = new executor_js_1.Executor();
+    observer = new observer_js_1.Observer();
+    searcher = new searcher_js_1.Searcher();
+    contextManager;
+    lastDiagnostics = [];
+    constructor(context) {
         this.context = context;
-        this.contextManager = new ContextManager(this.executor);
+        this.contextManager = new contextManager_js_1.ContextManager(this.executor);
     }
-
-    public async transitionTo(nextState: AgentState): Promise<void> {
+    async transitionTo(nextState) {
         console.log(`[AgentEngine] Transitioning from ${this.state} to ${nextState}`);
         this.state = nextState;
         if (this.context.onStateChange) {
             this.context.onStateChange(nextState);
         }
     }
-
-    public getState(): AgentState {
+    getState() {
         return this.state;
     }
-
-    public getPlan(): PlanStep[] {
+    getPlan() {
         return this.plan;
     }
-
-    private notifyPlanChange(): void {
+    notifyPlanChange() {
         if (this.context.onPlanChange) {
             this.context.onPlanChange([...this.plan]);
         }
     }
-
-    public async setPlanFromResponse(response: string): Promise<void> {
+    async setPlanFromResponse(response) {
         this.plan = this.planner.parsePlan(response);
         this.notifyPlanChange();
         if (this.plan.length > 0) {
             await this.transitionTo('Executing');
         }
     }
-
     /**
      * 중앙 자율 루프
      */
-    public async run(): Promise<void> {
+    async run() {
         if (this.state === 'Done' || this.state === 'Error') {
             return;
         }
-
         try {
             while (true) {
-                const currentState: AgentState = this.state;
-                if (currentState === 'Idle' || (currentState as string) === 'Done' || (currentState as string) === 'Error') {
+                const currentState = this.state;
+                if (currentState === 'Idle' || currentState === 'Done' || currentState === 'Error') {
                     break;
                 }
-
                 switch (currentState) {
                     case 'Planning':
                         await this.handlePlanning();
@@ -91,20 +82,18 @@ export class AgentEngine {
                         return;
                 }
             }
-        } catch (error) {
+        }
+        catch (error) {
             console.error('[AgentEngine] Critical Error in Loop:', error);
             await this.transitionTo('Error');
         }
     }
-
-    private async handlePlanning(): Promise<void> {
+    async handlePlanning() {
         console.log('[AgentEngine] Planning phase started...');
-
         try {
             // [Phase 4] Global RAG: 관련 파일 검색 및 컨텍스트 구성
             const relevantFiles = await this.searcher.searchRelevantFiles(this.context.userInput);
             const globalContext = await this.contextManager.assembleContext(relevantFiles);
-
             const prompt = `
 사용자 요청: ${this.context.userInput}
 
@@ -119,54 +108,50 @@ ${globalContext}
 2. **코드 작성 금지**: 각 단계의 구체적인 코드는 나중에 실행 시점에 따로 요청할 것이므로, 지금은 코드를 포함하지 마세요. (토큰 절약 및 잘림 방지)
 3. **의존성**: 순서가 중요하다면 [depends: step-id]를 포함하세요.
 `;
-
             let aiResponse = '';
-            const stream = streamChatCompletion([{ role: 'user', content: prompt }]);
+            const stream = (0, client_js_1.streamChatCompletion)([{ role: 'user', content: prompt }]);
             for await (const chunk of stream) {
                 aiResponse += chunk;
             }
-
             this.plan = this.planner.parsePlan(aiResponse);
             if (this.plan.length > 0) {
                 this.notifyPlanChange();
                 await this.transitionTo('Executing');
-            } else {
+            }
+            else {
                 console.warn('[AgentEngine] No plan extracted.');
                 await this.transitionTo('Done');
             }
-        } catch (error) {
+        }
+        catch (error) {
             console.error('[AgentEngine] Planning failed:', error);
             await this.transitionTo('Error');
         }
     }
-
-    private async handleExecution(): Promise<void> {
+    async handleExecution() {
         const step = this.getNextExecutableStep();
         if (!step) {
             const allDone = this.plan.every(s => s.status === 'done');
             if (allDone) {
                 await this.transitionTo('Done');
-            } else {
+            }
+            else {
                 console.warn('[AgentEngine] No executable steps found.');
                 await this.transitionTo('Idle');
             }
             return;
         }
-
         this.currentStepIndex = this.plan.indexOf(step);
         step.status = 'running';
         this.notifyPlanChange();
-
         try {
-            let action: any = null;
-
+            let action = null;
             // [Strategy] 지연 액션 생성 (Lazy Action Generation)
             // 계획 수립 시점에 액션이 없었다면, 실행 직전에 AI에게 구체적인 액션을 요청함
             if (!step.action) {
                 console.log(`[AgentEngine] Generating action for step: ${step.id}`);
                 const relevantFiles = await this.searcher.searchRelevantFiles(step.description);
                 const stepContext = await this.contextManager.assembleContext(relevantFiles);
-
                 const prompt = `
 현재 단계: ${step.description}
 
@@ -179,7 +164,7 @@ ${stepContext}
 - 답변에는 마크다운 없이 오직 JSON만 포함하거나, \`\`\`json 블록으로 감싸주세요.
 `;
                 let aiResponse = '';
-                const stream = streamChatCompletion([{ role: 'user', content: prompt }]);
+                const stream = (0, client_js_1.streamChatCompletion)([{ role: 'user', content: prompt }]);
                 for await (const chunk of stream) {
                     aiResponse += chunk;
                 }
@@ -187,13 +172,13 @@ ${stepContext}
                 const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
                 step.action = jsonMatch ? jsonMatch[0] : aiResponse;
             }
-
             if (step.action) {
                 try {
                     // JSON 내부에 중첩된 마크다운 백틱 처리 등 정제
                     const cleanAction = step.action.replace(/^```json\s*|^```\s*|```$/g, '').trim();
                     action = JSON.parse(cleanAction);
-                } catch (e) {
+                }
+                catch (e) {
                     console.warn('[AgentEngine] Failed to parse action JSON, falling back to raw write.', e);
                     // 폴백: JSON 파싱 실패 시 내용을 그대로 파일 쓰기로 간주 (위험할 수 있음)
                     const pathMatch = step.description.match(/(`|'|")(.+?\.\w+)\1/);
@@ -202,40 +187,39 @@ ${stepContext}
                     }
                 }
             }
-
             if (action) {
                 const result = await this.executor.execute(action);
                 step.result = result;
-            } else {
+            }
+            else {
                 step.result = 'No executable action found for this step.';
             }
-
             step.status = 'done';
             this.notifyPlanChange();
             await this.transitionTo('Observing');
-        } catch (error) {
+        }
+        catch (error) {
             step.status = 'failed';
             step.result = error instanceof Error ? error.message : 'Unknown error';
             this.notifyPlanChange();
             await this.transitionTo('Fixing');
         }
     }
-
-    private getNextExecutableStep(): PlanStep | undefined {
+    getNextExecutableStep() {
         return this.plan.find(step => {
-            if (step.status !== 'pending') return false;
-            if (!step.dependsOn || step.dependsOn.length === 0) return true;
+            if (step.status !== 'pending')
+                return false;
+            if (!step.dependsOn || step.dependsOn.length === 0)
+                return true;
             return step.dependsOn.every(depId => {
                 const depStep = this.plan.find(s => s.id === depId);
                 return depStep && depStep.status === 'done';
             });
         });
     }
-
-    private async handleObservation(): Promise<void> {
+    async handleObservation() {
         this.lastDiagnostics = await this.observer.getDiagnostics();
         const errors = this.lastDiagnostics.filter(d => d.severity === 'Error');
-
         if (errors.length > 0) {
             const step = this.plan[this.currentStepIndex];
             if (step) {
@@ -244,28 +228,25 @@ ${stepContext}
                 this.notifyPlanChange();
             }
             await this.transitionTo('Fixing');
-        } else {
+        }
+        else {
             await this.transitionTo('Executing');
         }
     }
-
-    private async handleReflection(): Promise<void> {
+    async handleReflection() {
         await this.transitionTo('Executing');
     }
-
-    private async handleFixing(): Promise<void> {
+    async handleFixing() {
         const step = this.plan[this.currentStepIndex];
         if (!step) {
             await this.transitionTo('Idle');
             return;
         }
-
         const attemptCount = this.fixAttempts.get(step.id) || 0;
         if (attemptCount >= this.context.maxFixAttempts) {
             await this.transitionTo('Error');
             return;
         }
-
         this.fixAttempts.set(step.id, attemptCount + 1);
         const errorContext = this.observer.formatDiagnostics(this.lastDiagnostics);
         const prompt = `
@@ -276,32 +257,30 @@ ${errorContext}
 파일이 길 경우 반드시 **Search/Replace** 형식을 사용하여 필요한 부분만 수정하세요.
 형식: { "type": "write", "payload": { "path": "...", "content": "<<<<<<< SEARCH\\n...\\n=======\\n...\\n>>>>>>> REPLACE" } }
 `;
-
         try {
             let aiResponse = '';
-            const stream = streamChatCompletion([{ role: 'user', content: prompt }]);
+            const stream = (0, client_js_1.streamChatCompletion)([{ role: 'user', content: prompt }]);
             for await (const chunk of stream) {
                 aiResponse += chunk;
             }
-
             const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
                 const action = JSON.parse(jsonMatch[0]);
                 const result = await this.executor.execute(action);
                 step.result = `[Auto-Fix] ${result}`;
             }
-
             await this.transitionTo('Observing');
-        } catch (error) {
+        }
+        catch (error) {
             await this.transitionTo('Error');
         }
     }
-
-    public updateContext(partialContext: Partial<AgentContext>): void {
+    updateContext(partialContext) {
         this.context = { ...this.context, ...partialContext };
     }
-
-    public stop(): void {
+    stop() {
         this.state = 'Idle';
     }
 }
+exports.AgentEngine = AgentEngine;
+//# sourceMappingURL=engine.js.map

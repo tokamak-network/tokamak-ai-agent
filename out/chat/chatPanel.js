@@ -37,6 +37,7 @@ exports.ChatPanel = void 0;
 const vscode = __importStar(require("vscode"));
 const client_js_1 = require("../api/client.js");
 const settings_js_1 = require("../config/settings.js");
+const engine_js_1 = require("../agent/engine.js");
 // 기본 내장 스킬 (파일이 없을 때 사용)
 const BUILTIN_SKILLS = [
     {
@@ -95,6 +96,7 @@ class ChatPanel {
     currentMode = 'ask';
     pendingOperations = [];
     currentAbortController = null;
+    agentEngine;
     static setContext(context) {
         ChatPanel.extensionContext = context;
     }
@@ -106,11 +108,31 @@ class ChatPanel {
         this.panel.webview.html = this.getHtmlContent();
         this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
         this.panel.webview.onDidReceiveMessage(async (message) => this.handleMessage(message), null, this.disposables);
+        this.initAgentEngine();
+    }
+    initAgentEngine() {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        const context = {
+            sessionId: this.currentSessionId || 'default',
+            mode: this.currentMode,
+            userInput: '', // 초기값
+            history: this.chatHistory,
+            workspacePath: workspaceFolder?.uri.fsPath || '',
+            maxFixAttempts: 3,
+            tokenBudget: 4000,
+            onStateChange: (state) => {
+                this.panel.webview.postMessage({ command: 'agentStateChanged', state });
+            },
+            onPlanChange: (plan) => {
+                this.panel.webview.postMessage({ command: 'updatePlan', plan });
+            }
+        };
+        this.agentEngine = new engine_js_1.AgentEngine(context);
     }
     async handleMessage(message) {
         switch (message.command) {
             case 'sendMessage':
-                await this.handleUserMessage(message.text, message.attachedFiles || []);
+                await this.handleUserMessage(message.text, message.attachedFiles || [], message.attachedImages || []);
                 break;
             case 'insertCode':
                 await this.insertCodeToEditor(message.code);
@@ -242,7 +264,15 @@ class ChatPanel {
             let title = 'New Conversation';
             const firstUserMessage = this.chatHistory.find(m => m.role === 'user');
             if (firstUserMessage) {
-                title = firstUserMessage.content.split('\n')[0].substring(0, 30) + (firstUserMessage.content.length > 30 ? '...' : '');
+                let content = '';
+                if (typeof firstUserMessage.content === 'string') {
+                    content = firstUserMessage.content;
+                }
+                else if (Array.isArray(firstUserMessage.content)) {
+                    const textPart = firstUserMessage.content.find((p) => p.type === 'text');
+                    content = textPart ? textPart.text : '';
+                }
+                title = content.split('\n')[0].substring(0, 30) + (content.length > 30 ? '...' : '');
             }
             const session = {
                 id: this.currentSessionId,
@@ -632,13 +662,22 @@ actual file content here (for create/edit only)
 <<<END_OPERATION>>>
 
 Rules:
-- You can output multiple FILE_OPERATION blocks
-- For 'edit', provide the COMPLETE new file content.
-- For 'read', provide the PATH only, and I will show you the content in the next turn
-- For 'delete', no CONTENT is needed
-- CRITICAL: Ensure the code is syntactically correct and includes all closing braces (}). NEVER truncate the code at the end.
-- Always explain what you're doing before the operations.
-- After operations, summarize what was done.
+- For 'create', provide the COMPLETE file content.
+- For 'edit', provide one or more SEARCH/REPLACE blocks. DO NOT provide the complete file content unless necessary.
+- For 'read', provide the PATH only, and I will show you the content in the next turn.
+
+SEARCH/REPLACE Block Format:
+<<<<<<< SEARCH
+[exact code to find]
+=======
+[new code to replace with]
+>>>>>>> REPLACE
+
+Rules for SEARCH/REPLACE:
+1. The SEARCH part must EXACTLY match the code in the file, including indentation and spacing.
+2. Provide enough context in the SEARCH block to make it unique.
+3. You can have multiple SEARCH/REPLACE blocks in one CONTENT section.
+4. Always explain what you're doing before the operations.
 - Be careful and precise with file paths.
 - Ask for confirmation if the task is ambiguous.
 
@@ -662,22 +701,34 @@ export function helper() {
     }
     parseFileOperations(response) {
         const operations = [];
-        const regex = /<<<FILE_OPERATION>>>([\s\S]*?)<<<END_OPERATION>>>/g;
+        // 태그 매칭 시 앞뒤 공백이나 대소문자에 더 유연하게 대응
+        const regex = /<<<FILE_OPERATION>>>([\s\S]*?)(?:<<<END_OPERATION>>>|$)/gi;
         let match;
         while ((match = regex.exec(response)) !== null) {
             const block = match[1];
             const typeMatch = block.match(/TYPE:\s*(create|edit|delete|read)/i);
-            const pathMatch = block.match(/PATH:\s*(.+)/i);
+            const pathMatch = block.match(/PATH:\s*[`'"]?([^`'"]+)[`'"]?/i);
             const descMatch = block.match(/DESCRIPTION:\s*(.+)/i);
-            // Flexible CONTENT parsing: matches content even if trailing backticks are missing or incomplete
-            const contentMatch = block.match(/CONTENT:\s*```[\w]*\n?([\s\S]*?)(?:```|$)/i);
+            // CONTENT 파싱 강화: 백틱 유무와 상관없이 추출 시도
+            let content;
+            const contentWithBackticks = block.match(/CONTENT:\s*```[\w]*\n?([\s\S]*?)(?:```|$)/i);
+            if (contentWithBackticks) {
+                content = contentWithBackticks[1];
+            }
+            else {
+                // 백틱이 없는 경우 CONTENT: 다음부터 블록 끝까지(또는 다음 필드 전까지)를 내용으로 간주
+                const plainContentMatch = block.match(/CONTENT:\s*([\s\S]+)$/i);
+                if (plainContentMatch) {
+                    content = plainContentMatch[1].trim();
+                }
+            }
             if (typeMatch && pathMatch) {
                 const type = typeMatch[1].toLowerCase();
                 operations.push({
                     type: type,
                     path: pathMatch[1].trim(),
                     description: descMatch ? descMatch[1].trim() : '',
-                    content: contentMatch ? contentMatch[1] : undefined,
+                    content: content,
                 });
             }
         }
@@ -691,53 +742,91 @@ export function helper() {
         }
         let successCount = 0;
         let errorCount = 0;
+        const edit = new vscode.WorkspaceEdit();
         for (const op of this.pendingOperations) {
             try {
                 const fileUri = vscode.Uri.joinPath(workspaceFolder.uri, op.path);
                 switch (op.type) {
                     case 'create':
-                    case 'edit':
                         if (op.content !== undefined) {
-                            // Ensure directory exists
-                            const dirPath = op.path.split('/').slice(0, -1).join('/');
-                            if (dirPath) {
-                                const dirUri = vscode.Uri.joinPath(workspaceFolder.uri, dirPath);
-                                try {
-                                    await vscode.workspace.fs.createDirectory(dirUri);
-                                }
-                                catch {
-                                    // Directory might already exist
-                                }
-                            }
-                            await vscode.workspace.fs.writeFile(fileUri, Buffer.from(op.content, 'utf8'));
+                            edit.createFile(fileUri, { overwrite: true, ignoreIfExists: false });
+                            edit.insert(fileUri, new vscode.Position(0, 0), op.content);
                             successCount++;
                         }
                         break;
+                    case 'edit':
+                        if (op.content !== undefined) {
+                            const existingData = await vscode.workspace.fs.readFile(fileUri);
+                            let currentContent = Buffer.from(existingData).toString('utf8');
+                            if (op.content.includes('<<<<<<< SEARCH')) {
+                                const blocks = op.content.split(/>>>>>>> REPLACE\s*/);
+                                let anyApplied = false;
+                                for (const block of blocks) {
+                                    if (!block.includes('<<<<<<< SEARCH'))
+                                        continue;
+                                    const parts = block.split(/=======/);
+                                    if (parts.length !== 2)
+                                        continue;
+                                    const searchPart = parts[0].split(/<<<<<<< SEARCH\s*/)[1];
+                                    const replacePart = parts[1];
+                                    if (searchPart && replacePart) {
+                                        const trimmedSearch = searchPart.trim();
+                                        if (currentContent.includes(trimmedSearch)) {
+                                            currentContent = currentContent.replace(trimmedSearch, replacePart.trim());
+                                            anyApplied = true;
+                                        }
+                                    }
+                                }
+                                if (anyApplied) {
+                                    const docLines = currentContent.split('\n').length;
+                                    edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)), currentContent);
+                                    successCount++;
+                                }
+                                else {
+                                    throw new Error(`No matching SEARCH blocks found in ${op.path}`);
+                                }
+                            }
+                            else {
+                                const docLines = currentContent.split('\n').length;
+                                edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)), op.content);
+                                successCount++;
+                            }
+                        }
+                        break;
                     case 'delete':
-                        await vscode.workspace.fs.delete(fileUri);
+                        edit.deleteFile(fileUri, { ignoreIfNotExists: true });
                         successCount++;
                         break;
                 }
             }
             catch (error) {
                 errorCount++;
-                console.error(`Failed to ${op.type} ${op.path}:`, error);
+                console.error(`Failed to stage ${op.type} for ${op.path}:`, error);
+            }
+        }
+        // 일괄 실행
+        const success = await vscode.workspace.applyEdit(edit);
+        if (success) {
+            if (successCount > 0) {
+                vscode.window.showInformationMessage(`Successfully applied ${successCount} file operation(s).`);
+            }
+        }
+        else {
+            console.error('[ChatPanel] WorkspaceEdit failed. Check for read-only files or conflicting edits.');
+            if (successCount > 0) {
+                vscode.window.showErrorMessage(`Failed to apply ${successCount} operation(s) via WorkspaceEdit. Please verify file permissions.`);
+            }
+            else if (errorCount > 0) {
+                vscode.window.showErrorMessage(`Failed to stage ${errorCount} operation(s). Check the console (Developer Tools) for details.`);
             }
         }
         this.pendingOperations = [];
         this.panel.webview.postMessage({ command: 'operationsCleared' });
-        if (successCount > 0) {
-            vscode.window.showInformationMessage(`Applied ${successCount} file operation(s)`);
-        }
-        if (errorCount > 0) {
-            vscode.window.showErrorMessage(`Failed to apply ${errorCount} operation(s)`);
-        }
     }
     async previewFileOperation(index) {
         const operation = this.pendingOperations[index];
-        if (!operation) {
+        if (!operation)
             return;
-        }
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (!workspaceFolder) {
             vscode.window.showErrorMessage('No workspace folder open');
@@ -746,36 +835,53 @@ export function helper() {
         const fileUri = vscode.Uri.joinPath(workspaceFolder.uri, operation.path);
         try {
             if (operation.type === 'create') {
-                // Show proposed content vs empty
-                const emptyUri = vscode.Uri.parse(`untitled:empty`);
+                const emptyUri = vscode.Uri.parse('untitled:empty');
                 const proposedUri = vscode.Uri.parse(`tokamak-preview:${operation.path}`);
-                // Register content provider for the preview
                 const proposedContent = operation.content || '';
                 const provider = new (class {
-                    provideTextDocumentContent() {
-                        return proposedContent;
-                    }
+                    provideTextDocumentContent() { return proposedContent; }
                 })();
                 const disposable = vscode.workspace.registerTextDocumentContentProvider('tokamak-preview', provider);
                 await vscode.commands.executeCommand('vscode.diff', emptyUri, proposedUri, `[CREATE] ${operation.path}`);
-                // Clean up after a delay
                 setTimeout(() => disposable.dispose(), 5000);
             }
             else if (operation.type === 'edit') {
-                // Show diff between current and proposed
-                const proposedContent = operation.content || '';
-                const provider = new (class {
-                    provideTextDocumentContent() {
-                        return proposedContent;
+                try {
+                    const existingData = await vscode.workspace.fs.readFile(fileUri);
+                    const existingContent = Buffer.from(existingData).toString('utf8');
+                    let proposedContent = operation.content || '';
+                    if (proposedContent.includes('<<<<<<< SEARCH')) {
+                        const blocks = proposedContent.split('>>>>>>> REPLACE');
+                        let result = existingContent;
+                        for (const block of blocks) {
+                            if (!block.trim())
+                                continue;
+                            const searchParts = block.split('=======');
+                            if (searchParts.length !== 2)
+                                continue;
+                            const searchContent = searchParts[0].split('<<<<<<< SEARCH')[1]?.trim();
+                            const replaceContent = searchParts[1]?.trim();
+                            if (searchContent !== undefined && replaceContent !== undefined) {
+                                if (result.includes(searchContent)) {
+                                    result = result.replace(searchContent, replaceContent);
+                                }
+                            }
+                        }
+                        proposedContent = result;
                     }
-                })();
-                const disposable = vscode.workspace.registerTextDocumentContentProvider('tokamak-preview', provider);
-                const proposedUri = vscode.Uri.parse(`tokamak-preview:${operation.path}`);
-                await vscode.commands.executeCommand('vscode.diff', fileUri, proposedUri, `[EDIT] ${operation.path}`);
-                setTimeout(() => disposable.dispose(), 5000);
+                    const provider = new (class {
+                        provideTextDocumentContent() { return proposedContent; }
+                    })();
+                    const disposable = vscode.workspace.registerTextDocumentContentProvider('tokamak-preview', provider);
+                    const proposedUri = vscode.Uri.parse(`tokamak-preview:${operation.path}`);
+                    await vscode.commands.executeCommand('vscode.diff', fileUri, proposedUri, `[EDIT] ${operation.path}`);
+                    setTimeout(() => disposable.dispose(), 5000);
+                }
+                catch (error) {
+                    vscode.window.showErrorMessage(`Preview failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                }
             }
             else if (operation.type === 'delete') {
-                // Show current content (will be deleted)
                 await vscode.window.showTextDocument(fileUri, { preview: true });
                 vscode.window.showWarningMessage(`This file will be deleted: ${operation.path}`);
             }
@@ -784,14 +890,36 @@ export function helper() {
             vscode.window.showErrorMessage(`Could not preview: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
     }
-    async handleUserMessage(text, attachedFiles) {
+    async handleUserMessage(text, attachedFiles, attachedImages = []) {
+        if (!text && attachedFiles.length === 0 && attachedImages.length === 0)
+            return;
+        // [Phase 4] 엔진에 사용자 입력 업데이트
+        if (this.agentEngine) {
+            this.agentEngine.updateContext({ userInput: text });
+        }
+        const messageId = Date.now().toString();
         if (!(await (0, settings_js_1.isConfigured)())) {
             const configured = await (0, settings_js_1.promptForConfiguration)();
             if (!configured) {
                 this.panel.webview.postMessage({
                     command: 'addMessage',
                     role: 'assistant',
-                    content: '⚙️ **설정이 필요합니다**\n\nTokamak AI를 사용하려면 API 설정이 필요합니다.\n\n**설정 방법:**\n1. `Cmd+,` (Mac) / `Ctrl+,` (Windows)로 설정 열기\n2. `tokamak` 검색\n3. `API Key`와 `Base URL` 입력\n\n또는 `Cmd+Shift+P` → "Preferences: Open Settings (JSON)"에서:\n```json\n{\n  "tokamak.apiKey": "your-api-key",\n  "tokamak.baseUrl": "https://your-api.com/v1"\n}\n```',
+                    content: `⚙️ **설정이 필요합니다**
+
+Tokamak AI를 사용하려면 API 설정이 필요합니다.
+
+**설정 방법:**
+1. \`Cmd + ,\` (Mac) / \`Ctrl + ,\` (Windows)로 설정 열기
+2. \`tokamak\` 검색
+3. \`API Key\`와 \`Base URL\` 입력
+
+또는 \`Cmd + Shift + P\` → "Preferences: Open Settings (JSON)"에서:
+\`\`\`json
+{
+  "tokamak.apiKey": "your-api-key",
+  "tokamak.baseUrl": "https://your-api.com/v1"
+}
+\`\`\``,
                 });
                 return;
             }
@@ -806,18 +934,29 @@ export function helper() {
         let processedText = text;
         if (slashCommand) {
             processedText = remainingText
-                ? `${slashCommand.prompt}\n\nAdditional context: ${remainingText}`
+                ? `${slashCommand.prompt} \n\nAdditional context: ${remainingText} `
                 : slashCommand.prompt;
         }
         let fileContexts = '';
         for (const filePath of attachedFiles) {
             fileContexts += await this.getFileContent(filePath);
         }
-        const editorContext = attachedFiles.length === 0 ? this.getEditorContext() : '';
-        const userMessageWithContext = `${processedText}${fileContexts}${editorContext}`;
-        this.chatHistory.push({ role: 'user', content: userMessageWithContext });
-        const displayText = attachedFiles.length > 0
-            ? `${text}\n\n📎 ${attachedFiles.join(', ')}`
+        const editorContext = (attachedFiles.length === 0 && attachedImages.length === 0) ? this.getEditorContext() : '';
+        const userMessageWithContext = `${processedText}${fileContexts}${editorContext} `;
+        // Create multimodal content if images are present
+        let content = userMessageWithContext;
+        if (attachedImages.length > 0) {
+            content = [
+                { type: 'text', text: userMessageWithContext },
+                ...attachedImages.map(img => ({
+                    type: 'image_url',
+                    image_url: { url: img }
+                }))
+            ];
+        }
+        this.chatHistory.push({ role: 'user', content: content });
+        const displayText = (attachedFiles.length > 0 || attachedImages.length > 0)
+            ? `${text}${attachedFiles.length > 0 ? `\n\n📎 ${attachedFiles.join(', ')}` : ''}${attachedImages.length > 0 ? `\n\n🖼️ ${attachedImages.length} images attached (pasted)` : ''} `
             : text;
         // Send user message to UI
         this.panel.webview.postMessage({ command: 'addMessage', role: 'user', content: displayText });
@@ -849,6 +988,12 @@ export function helper() {
                     break;
                 this.chatHistory.push({ role: 'assistant', content: fullResponse });
                 needsMoreContext = false;
+                // [Phase 1 통합] Plan 모드인 경우 AgentEngine에 전달
+                if (this.currentMode === 'plan' && this.agentEngine) {
+                    await this.agentEngine.setPlanFromResponse(fullResponse);
+                    // 자율 루프 시작 (현재는 플래닝 단계까지만 시뮬레이션)
+                    await this.agentEngine.run();
+                }
                 // In agent or ask mode, parse file operations
                 const operations = this.parseFileOperations(fullResponse);
                 // Handle READ operations automatically
@@ -872,7 +1017,8 @@ export function helper() {
                 }
                 // Handle other operations (create/edit/delete) via UI
                 const writeOps = operations.filter(op => op.type !== 'read');
-                if (writeOps.length > 0 && this.currentMode === 'agent') {
+                if (writeOps.length > 0) {
+                    // Agent 모드가 아니더라도 Plan 모드 등에서 작업이 있으면 제안할 수 있도록 함
                     this.pendingOperations = writeOps;
                     this.panel.webview.postMessage({
                         command: 'showOperations',
@@ -926,7 +1072,7 @@ export function helper() {
                     this.panel.webview.postMessage({
                         command: 'addMessage',
                         role: 'assistant',
-                        content: `❌ **오류 발생**\n\n${error.message}\n\n문제가 계속되면 설정을 확인해주세요.`,
+                        content: `❌ ** 오류 발생 **\n\n${error.message} \n\n문제가 계속되면 설정을 확인해주세요.`,
                     });
                 }
             }
@@ -1268,6 +1414,35 @@ export function helper() {
         .file-tag .remove-btn:hover {
             opacity: 1;
         }
+        .image-tag {
+            display: inline-flex;
+            position: relative;
+            border: 1px solid var(--vscode-widget-border);
+            border-radius: 4px;
+            overflow: hidden;
+            background: var(--vscode-editor-background);
+        }
+        .image-tag img {
+            max-width: 80px;
+            max-height: 80px;
+            display: block;
+            object-fit: cover;
+        }
+        .image-tag .remove-img {
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            background: rgba(0, 0, 0, 0.6);
+            color: white;
+            border-radius: 50%;
+            width: 16px;
+            height: 16px;
+            font-size: 10px;
+            text-align: center;
+            line-height: 16px;
+            cursor: pointer;
+            z-index: 10;
+        }
         .file-tag .file-name {
             cursor: pointer;
         }
@@ -1348,7 +1523,7 @@ export function helper() {
             border: 1px solid var(--vscode-dropdown-border);
             border-radius: 6px;
             margin-bottom: 5px;
-            box-shadow: 0 -4px 12px rgba(0,0,0,0.2);
+            box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.2);
         }
         #autocomplete.visible {
             display: block;
@@ -1500,7 +1675,7 @@ export function helper() {
         #reject-btn {
             background-color: transparent;
             color: var(--vscode-foreground);
-            border: 1px solid var(--vscode-widget-border) !important;
+            border: 1px solid var(--vscode-widget-border)!important;
         }
 
         /* Sessions History Panel */
@@ -1516,7 +1691,7 @@ export function helper() {
             transition: left 0.3s ease;
             display: flex;
             flex-direction: column;
-            box-shadow: 2px 0 10px rgba(0,0,0,0.2);
+            box-shadow: 2px 0 10px rgba(0, 0, 0, 0.2);
         }
         #history-panel.visible {
             left: 0;
@@ -1585,7 +1760,7 @@ export function helper() {
             left: 0;
             right: 0;
             bottom: 0;
-            background: rgba(0,0,0,0.3);
+            background: rgba(0, 0, 0, 0.3);
             z-index: 999;
         }
         #history-overlay.visible {
@@ -1606,6 +1781,69 @@ export function helper() {
         #history-btn:hover {
             background: var(--vscode-toolbar-hoverBackground);
         }
+
+        /* Interactive Planner Styles */
+        #plan-panel {
+            display: none;
+            padding: 12px 15px;
+            background-color: var(--vscode-sideBar-background);
+            border-top: 1px solid var(--vscode-widget-border);
+            border-bottom: 1px solid var(--vscode-widget-border);
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        #plan-panel.visible {
+            display: block;
+        }
+        .plan-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .plan-header h4 {
+            margin: 0;
+            font-size: 0.9em;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .agent-status-badge {
+            font-size: 0.75em;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background-color: var(--vscode-badge-background);
+            color: var(--vscode-badge-foreground);
+        }
+        .plan-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            margin-bottom: 6px;
+            font-size: 0.85em;
+            opacity: 0.8;
+        }
+        .plan-item.running {
+            opacity: 1;
+            font-weight: bold;
+            color: var(--vscode-textLink-foreground);
+        }
+        .plan-item.done {
+            opacity: 0.6;
+            text-decoration: line-through;
+        }
+        .plan-item.failed {
+            color: var(--vscode-errorForeground);
+            opacity: 1;
+        }
+        .step-icon {
+            flex-shrink: 0;
+            width: 16px;
+            text-align: center;
+        }
+        .step-desc {
+            flex: 1;
+        }
     </style>
 </head>
 <body>
@@ -1623,7 +1861,7 @@ export function helper() {
             <div style="flex:1"></div>
             <h3>Tokamak AI</h3>
             <div style="flex:1"></div>
-            <label for="model-select" style="font-size: 0.8em; opacity: 0.7;">Model:</label>
+            <label for="model-select" style="font-size: 0.8em; opacity: 0.7;">Model: </label>
             <select id="model-select"></select>
             <button id="new-chat-btn" title="Start new conversation">+ New</button>
         </div>
@@ -1636,6 +1874,13 @@ export function helper() {
     </div>
     <div id="chat-container"></div>
     <div class="typing-indicator" id="typing-indicator">AI is thinking...</div>
+    <div id="plan-panel">
+        <div class="plan-header">
+            <h4>📋 Implementation Plan</h4>
+            <span id="agent-status" class="agent-status-badge">Idle</span>
+        </div>
+        <div id="plan-list"></div>
+    </div>
     <div id="operations-panel">
         <h4>⚡ Pending File Operations</h4>
         <div id="operations-list"></div>
@@ -1658,77 +1903,98 @@ export function helper() {
         <div class="hint">💡 Type <strong>/</strong> for commands, <strong>@</strong> to attach files</div>
     </div>
 
-    <script>
-    (function() {
-        // Prevent duplicate initialization
-        if (window._tokamakInitialized) {
-            return;
-        }
-        window._tokamakInitialized = true;
+                                                                                                                                                                                                <script>
+                                                                                                                                                                                                (function () {
+                                                                                                                                                                                                    // Prevent duplicate initialization
+                                                                                                                                                                                                    if (window._tokamakInitialized) {
+                                                                                                                                                                                                        return;
+                                                                                                                                                                                                    }
+                                                                                                                                                                                                    window._tokamakInitialized = true;
 
-        const vscode = acquireVsCodeApi();
-        const chatContainer = document.getElementById('chat-container');
-        const messageInput = document.getElementById('message-input');
-        const sendBtn = document.getElementById('send-btn');
-        const stopBtn = document.getElementById('stop-btn');
-        const typingIndicator = document.getElementById('typing-indicator');
-        const modelSelect = document.getElementById('model-select');
-        const autocomplete = document.getElementById('autocomplete');
-        const attachedFilesContainer = document.getElementById('attached-files');
-        const modeTabs = document.querySelectorAll('.mode-tab');
-        const modeDescription = document.getElementById('mode-description');
-        const operationsPanel = document.getElementById('operations-panel');
-        const operationsList = document.getElementById('operations-list');
-        const applyBtn = document.getElementById('apply-btn');
-        const rejectBtn = document.getElementById('reject-btn');
-        const newChatBtn = document.getElementById('new-chat-btn');
-        const historyBtn = document.getElementById('history-btn');
-        const historyPanel = document.getElementById('history-panel');
-        const historyList = document.getElementById('history-list');
-        const historyOverlay = document.getElementById('history-overlay');
-        const closeHistoryBtn = document.getElementById('close-history');
+                                                                                                                                                                                                    const vscode = acquireVsCodeApi();
+                                                                                                                                                                                                    const chatContainer = document.getElementById('chat-container');
+                                                                                                                                                                                                    const messageInput = document.getElementById('message-input');
+                                                                                                                                                                                                    const sendBtn = document.getElementById('send-btn');
+                                                                                                                                                                                                    const stopBtn = document.getElementById('stop-btn');
+                                                                                                                                                                                                    const typingIndicator = document.getElementById('typing-indicator');
+                                                                                                                                                                                                    const modelSelect = document.getElementById('model-select');
+                                                                                                                                                                                                    const autocomplete = document.getElementById('autocomplete');
+                                                                                                                                                                                                    const attachedFilesContainer = document.getElementById('attached-files');
+                                                                                                                                                                                                    const modeTabs = document.querySelectorAll('.mode-tab');
+                                                                                                                                                                                                    const modeDescription = document.getElementById('mode-description');
+                                                                                                                                                                                                    const operationsPanel = document.getElementById('operations-panel');
+                                                                                                                                                                                                    const operationsList = document.getElementById('operations-list');
+                                                                                                                                                                                                    const applyBtn = document.getElementById('apply-btn');
+                                                                                                                                                                                                    const rejectBtn = document.getElementById('reject-btn');
+                                                                                                                                                                                                    const newChatBtn = document.getElementById('new-chat-btn');
+                                                                                                                                                                                                    const historyBtn = document.getElementById('history-btn');
+                                                                                                                                                                                                    const historyPanel = document.getElementById('history-panel');
+                                                                                                                                                                                                    const historyList = document.getElementById('history-list');
+                                                                                                                                                                                                    const historyOverlay = document.getElementById('history-overlay');
+                                                                                                                                                                                                    const closeHistoryBtn = document.getElementById('close-history');
+                                                                                                                                                                                                    const planPanel = document.getElementById('plan-panel');
+                                                                                                                                                                                                    const planList = document.getElementById('plan-list');
+                                                                                                                                                                                                    const agentStatusBadge = document.getElementById('agent-status');
 
-        let currentStreamingMessage = null;
-        let streamingContent = '';
-        let typingInterval = null;
-        let attachedFiles = [];
-        let autocompleteFiles = [];
-        let autocompleteCommands = [];
-        let autocompleteType = 'file'; // 'file' or 'command'
-        let selectedAutocompleteIndex = 0;
-        let mentionStartIndex = -1;
-        let slashStartIndex = -1;
-        let currentMode = 'ask';
+                                                                                                                                                                                                    let currentStreamingMessage = null;
+                                                                                                                                                                                                    let streamingContent = '';
+                                                                                                                                                                                                    let typingInterval = null;
+                                                                                                                                                                                                    let attachedFiles = [];
+                                                                                                                                                                                                    let autocompleteFiles = [];
+                                                                                                                                                                                                    let autocompleteCommands = [];
+                                                                                                                                                                                                    let autocompleteType = 'file'; // 'file' or 'command'
+                                                                                                                                                                                                    let selectedAutocompleteIndex = 0;
+                                                                                                                                                                                                    let mentionStartIndex = -1;
+                                                                                                                                                                                                    let slashStartIndex = -1;
+                                                                                                                                                                                                    let currentMode = 'ask';
+                                                                                                                                                                                                    let attachedImages = []; // Array of base64 strings
 
-        const modeDescriptions = {
-            ask: 'Ask questions about your code',
-            plan: 'Plan your implementation without code changes',
-            agent: 'AI will create, edit, and delete files for you'
-        };
+                                                                                                                                                                                                    function addImageTag(base64Data) {
+                                                                                                                                                                                                        const tag = document.createElement('div');
+                                                                                                                                                                                                        tag.className = 'image-tag';
+                                                                                                                                                                                                        tag.innerHTML = '<img src="' + base64Data + '"><span class="remove-img">×</span>';
 
-        const modePlaceholders = {
-            ask: 'Ask about your code... Type @ to attach files',
-            plan: 'Describe what you want to build...',
-            agent: 'Tell me what to implement...'
-        };
+                                                                                                                                                                                                        tag.querySelector('.remove-img').onclick = () => {
+                                                                                                                                                                                                            const index = attachedImages.indexOf(base64Data);
+                                                                                                                                                                                                            if (index > -1) {
+                                                                                                                                                                                                                attachedImages.splice(index, 1);
+                                                                                                                                                                                                            }
+                                                                                                                                                                                                            tag.remove();
+                                                                                                                                                                                                        };
 
-        vscode.postMessage({ command: 'ready' });
+                                                                                                                                                                                                        attachedFilesContainer.appendChild(tag);
+                                                                                                                                                                                                        attachedImages.push(base64Data);
+                                                                                                                                                                                                    }
 
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
+                                                                                                                                                                                                    const modeDescriptions = {
+                                                                                                                                                                                                        ask: 'Ask questions about your code',
+                                                                                                                                                                                                        plan: 'Plan your implementation without code changes',
+                                                                                                                                                                                                        agent: 'AI will create, edit, and delete files for you'
+                                                                                                                                                                                                    };
 
-        function parseMarkdown(text) {
-            let result = escapeHtml(text);
-            // Hide file operation blocks in display
-            result = result.replace(/&lt;&lt;&lt;FILE_OPERATION&gt;&gt;&gt;[\\s\\S]*?&lt;&lt;&lt;END_OPERATION&gt;&gt;&gt;/g, '');
-            result = result.replace(/\`\`\`(\\w*)\\n([\\s\\S]*?)\`\`\`/g, (match, lang, code) => {
-                const escapedCode = code.trim();
-                const langLabel = lang || 'code';
-                const isShell = ['bash', 'shell', 'sh', 'zsh', 'powershell', 'cmd'].includes(lang.toLowerCase());
-                const runBtn = isShell ? \`<button class="run-btn" onclick="runCommand(this)">▶ Run</button>\` : '';
+                                                                                                                                                                                                    const modePlaceholders = {
+                                                                                                                                                                                                        ask: 'Ask about your code... Type @ to attach files',
+                                                                                                                                                                                                        plan: 'Describe what you want to build...',
+                                                                                                                                                                                                        agent: 'Tell me what to implement...'
+                                                                                                                                                                                                    };
+
+                                                                                                                                                                                                    vscode.postMessage({ command: 'ready' });
+
+                                                                                                                                                                                                    function escapeHtml(text) {
+                                                                                                                                                                                                        const div = document.createElement('div');
+                                                                                                                                                                                                        div.textContent = text;
+                                                                                                                                                                                                        return div.innerHTML;
+                                                                                                                                                                                                    }
+
+                                                                                                                                                                                                    function parseMarkdown(text) {
+                                                                                                                                                                                                        let result = escapeHtml(text);
+                                                                                                                                                                                                        // Hide file operation blocks in display
+                                                                                                                                                                                                        result = result.replace(/&lt;&lt;&lt;FILE_OPERATION&gt;&gt;&gt;[\\s\\S]*?&lt;&lt;&lt;END_OPERATION&gt;&gt;&gt;/g, '');
+                                                                                                                                                                                                        result = result.replace(/\`\`\`(\\w*)\\n([\\s\\S]*?)\`\`\`/g, (match, lang, code) => {
+                                                                                                                                                                                                            const escapedCode = code.trim();
+                                                                                                                                                                                                            const langLabel = lang || 'code';
+                                                                                                                                                                                                            const isShell = ['bash', 'shell', 'sh', 'zsh', 'powershell', 'cmd'].includes(lang.toLowerCase());
+                                                                                                                                                                                                            const runBtn = isShell ?\`<button class="run-btn" onclick="runCommand(this)">▶ Run</button>\` : '';
                 return \`<div class="code-header"><span>\${langLabel}</span><div><button class="insert-btn" onclick="insertCode(this)">Insert</button>\${runBtn}</div></div><pre><code class="language-\${lang}">\${escapedCode}</code></pre>\`;
             });
             result = result.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
@@ -1739,7 +2005,7 @@ export function helper() {
 
         function addMessage(role, content) {
             const messageDiv = document.createElement('div');
-            messageDiv.className = \`message \${role}\`;
+            messageDiv.className = 'message ' + role;
 
             const roleDiv = document.createElement('div');
             roleDiv.className = 'message-role';
@@ -1747,7 +2013,44 @@ export function helper() {
 
             const contentDiv = document.createElement('div');
             contentDiv.className = 'message-content';
-            contentDiv.innerHTML = parseMarkdown(content);
+            
+            let textContent = '';
+            let images = [];
+            
+            if (typeof content === 'string') {
+                textContent = content;
+            } else if (Array.isArray(content)) {
+                content.forEach(item => {
+                    if (item.type === 'text') {
+                        textContent += item.text;
+                    } else if (item.type === 'image_url') {
+                        images.push(item.image_url.url);
+                    }
+                });
+            }
+            
+            contentDiv.innerHTML = parseMarkdown(textContent);
+            
+            if (images.length > 0) {
+                const imagesDiv = document.createElement('div');
+                imagesDiv.className = 'message-images';
+                imagesDiv.style.display = 'flex';
+                imagesDiv.style.flexWrap = 'wrap';
+                imagesDiv.style.gap = '8px';
+                imagesDiv.style.marginTop = '8px';
+                
+                images.forEach(src => {
+                    const img = document.createElement('img');
+                    img.src = src;
+                    img.style.maxWidth = '100%';
+                    img.style.maxHeight = '200px';
+                    img.style.borderRadius = '4px';
+                    img.style.cursor = 'pointer';
+                    img.onclick = () => window.open(src);
+                    imagesDiv.appendChild(img);
+                });
+                contentDiv.appendChild(imagesDiv);
+            }
 
             messageDiv.appendChild(roleDiv);
             messageDiv.appendChild(contentDiv);
@@ -1956,26 +2259,33 @@ export function helper() {
 
         let isSending = false;
         function sendMessage() {
-            if (isSending) return; // Prevent duplicate calls
+            if (isSending) return;
             
             const text = messageInput.value.trim();
-            if (!text && attachedFiles.length === 0) return;
+            if (!text && attachedFiles.length === 0 && attachedImages.length === 0) return;
 
             isSending = true;
             sendBtn.disabled = true;
+
             vscode.postMessage({
                 command: 'sendMessage',
                 text: text,
-                attachedFiles: attachedFiles.map(f => f.path)
+                attachedFiles: attachedFiles.map(f => f.path),
+                attachedImages: attachedImages
             });
+
             messageInput.value = '';
             messageInput.style.height = 'auto';
             attachedFiles = [];
+            attachedImages = [];
             attachedFilesContainer.innerHTML = '';
             hideAutocomplete();
-            
+
             // Reset flag after a short delay
-            setTimeout(() => { isSending = false; }, 100);
+            setTimeout(() => { 
+                isSending = false;
+                sendBtn.disabled = false;
+            }, 100);
         }
 
         function updateModels(models, selected) {
@@ -2160,6 +2470,20 @@ export function helper() {
             hideAutocomplete();
         });
 
+        messageInput.addEventListener('paste', (e) => {
+            const items = e.clipboardData.items;
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image') !== -1) {
+                    const blob = items[i].getAsFile();
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                        addImageTag(event.target.result);
+                    };
+                    reader.readAsDataURL(blob);
+                }
+            }
+        });
+
         window.addEventListener('message', (event) => {
             const message = event.data;
             switch (message.command) {
@@ -2219,79 +2543,118 @@ export function helper() {
                 case 'sessionsList':
                     renderSessions(message.sessions, message.currentSessionId);
                     break;
+                case 'updatePlan':
+                    updatePlanUI(message.plan);
+                    break;
+                case 'agentStateChanged':
+                    updateAgentStatusUI(message.state);
+                    break;
                 case 'generationStopped':
                     endStreaming();
                     break;
             }
         });
 
-        // Drag and drop handling
-        const dropZone = document.getElementById('drop-zone');
-
-        dropZone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            dropZone.classList.add('drag-over');
-        });
-
-        dropZone.addEventListener('dragleave', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            dropZone.classList.remove('drag-over');
-        });
-
-        dropZone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            dropZone.classList.remove('drag-over');
-
-            // Try different data formats
-            const uriList = e.dataTransfer.getData('text/uri-list');
-            const text = e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text');
-
-            // Handle VS Code Explorer drops (uri-list format)
-            if (uriList) {
-                const uris = uriList.split(/[\\r\\n]+/).filter(u => u && !u.startsWith('#'));
-                uris.forEach(uri => {
-                    vscode.postMessage({ command: 'resolveFilePath', uri: uri.trim() });
-                });
+        function updateAgentStatusUI(state) {
+            agentStatusBadge.textContent = state;
+            if (state !== 'Idle' && state !== 'Done' && state !== 'Error') {
+                planPanel.classList.add('visible');
             }
-            // Handle text/plain drops
-            else if (text) {
-                const lines = text.split(/[\\r\\n]+/);
-                lines.forEach(line => {
-                    line = line.trim();
-                    if (line) {
-                        vscode.postMessage({ command: 'resolveFilePath', uri: line });
-                    }
-                });
+        }
+
+        function updatePlanUI(plan) {
+            if (!plan || plan.length === 0) {
+                planPanel.classList.remove('visible');
+                return;
             }
+            
+            planPanel.classList.add('visible');
+            planList.innerHTML = '';
+            
+            plan.forEach(step => {
+                const item = document.createElement('div');
+                item.className = 'plan-item ' + step.status;
+                
+                let icon = '○';
+                if (step.status === 'running') icon = '⚡';
+                if (step.status === 'done') icon = '✓';
+                if (step.status === 'failed') icon = '✗';
+                
+                item.innerHTML = \`
+                    <span class="step-icon">\${icon}</span>
+                    <span class="step-desc">\${escapeHtml(step.description)}</span>
+                \`;
+                planList.appendChild(item);
+            });
+        }
 
-            // Handle dropped files from system
-            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-                Array.from(e.dataTransfer.files).forEach(file => {
-                    if (file.path) {
-                        vscode.postMessage({ command: 'resolveFilePath', uri: file.path });
-                    }
-                });
+// Drag and drop handling
+const dropZone = document.getElementById('drop-zone');
+
+dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropZone.classList.add('drag-over');
+});
+
+dropZone.addEventListener('dragleave', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropZone.classList.remove('drag-over');
+});
+
+dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropZone.classList.remove('drag-over');
+
+    // Try different data formats
+    const uriList = e.dataTransfer.getData('text/uri-list');
+    const text = e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text');
+
+    // Handle VS Code Explorer drops (uri-list format)
+    if (uriList) {
+        const uris = uriList.split(/[\\r\\n]+/).filter(u => u && !u.startsWith('#'));
+        uris.forEach(uri => {
+            vscode.postMessage({ command: 'resolveFilePath', uri: uri.trim() });
+        });
+    }
+    // Handle text/plain drops
+    else if (text) {
+        const lines = text.split(/[\\r\\n]+/);
+        lines.forEach(line => {
+            line = line.trim();
+            if (line) {
+                vscode.postMessage({ command: 'resolveFilePath', uri: line });
             }
         });
+    }
 
-        // Also allow dropping on the whole chat container
-        document.body.addEventListener('dragover', (e) => {
-            e.preventDefault();
+    // Handle dropped files from system
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        Array.from(e.dataTransfer.files).forEach(file => {
+            if (file.path) {
+                vscode.postMessage({ command: 'resolveFilePath', uri: file.path });
+            }
         });
+    }
+});
 
-        document.body.addEventListener('drop', (e) => {
-            e.preventDefault();
-        });
+// Also allow dropping on the whole chat container
+document.body.addEventListener('dragover', (e) => {
+    e.preventDefault();
+});
 
-        window.insertCode = insertCode;
-        window.runCommand = runCommand;
-    })();
-    </script>
-</body>
-</html>`;
+document.body.addEventListener('drop', (e) => {
+    e.preventDefault();
+});
+
+window.insertCode = insertCode;
+window.runCommand = runCommand;
+    }) ();
+</script>
+    </body>
+    </html>`;
     }
 }
 exports.ChatPanel = ChatPanel;

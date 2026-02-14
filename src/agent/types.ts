@@ -25,6 +25,7 @@ export interface PlanStep {
 export interface AgentContext {
     sessionId: string;
     mode: 'ask' | 'plan' | 'agent';
+    userInput: string; // 현재 사용자 요청 (Global RAG 및 Planning용)
     history: ChatMessage[];
     workspacePath: string;
     maxFixAttempts: number;

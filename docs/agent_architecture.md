@@ -1,6 +1,6 @@
 # Tokamak AI Agent Architecture
 
-Tokamak AI Agent는 단순한 명령어 실행기에서 **자율 루프(Autonomous Loop)**를 가진 지능형 에이전트로 진화하고 있습니다. 현재 Phase 3인 **Smart Observer & Auto-Fixer** 구현이 완료되었습니다.
+Tokamak AI Agent는 단순한 명령어 실행기에서 **자율 루프(Autonomous Loop)**를 가진 지능형 에이전트로 진화하고 있습니다. 현재 Phase 4인 **Global RAG (Semantic Search & Summarization)** 구현이 완료되었습니다.
 
 ## 1. 개요 (High-level)
 
@@ -45,6 +45,16 @@ Tokamak AI Agent는 단순한 명령어 실행기에서 **자율 루프(Autonomo
     2. AI가 수정안(`write` 또는 `search/replace`)을 생성.
     3. Executor가 이를 적용한 후 다시 `Observing` 단계로 돌아가 검증.
 - **루프 가드**: 동일한 에러가 반복되거나 해결되지 않을 경우, 무한 루프를 방지하기 위해 `maxFixAttempts`(최대 시도 횟수)를 초과하면 중단하고 사용자에게 보고합니다.
+
+### 3.3. Phase 4: Semantic Search & Global RAG (전역 문맥 파악)
+프로젝트 전체의 구조를 이해하고 필요한 정보만 선별하여 AI에게 전달하는 지능형 컨텍스트 관리 시스템입니다.
+- **Searcher (지능형 랭킹)**: 
+    - 단순 키워드 검색을 넘어 현재 열린 파일(Active Editor)에 가장 높은 가중치(20점)를 부여합니다.
+    - 파일 확장자(.ts, .tsx) 및 주요 문서(README, architecture) 가중치를 추가하여 핵심 로직 파일을 우선적으로 찾아냅니다.
+- **Summarizer (AI 기반 요약)**: 
+    - 파일 크기가 크거나 토큰 예산이 부족할 경우, AI가 해당 코드의 클래스 구조와 핵심 API 인터페이스만 5~10문장으로 요약하여 전달합니다.
+- **ContextManager (토큰 최적화)**: 
+    - 모델의 컨텍스트 윈도우(MAX_TOKENS)를 고려하여, 중요도(Score)가 높은 파일은 전체를 보여주고, 보조적인 파일은 요약본을 사용하거나 과감히 제외하여 최적의 지식 밀도를 유지합니다.
 
 ---
 
@@ -91,4 +101,4 @@ graph TD
 - [x] **Phase 1**: 상태 머신 및 기본 UI 연동 완료
 - [x] **Phase 2**: 단계별 의존성 관리 및 자율 실행 루프 구축 완료
 - [x] **Phase 3**: Smart Observer (Linter 연동) 및 Auto-Fixer 구축 완료
-- [ ] **Phase 4**: Global RAG 및 대규모 작업 최적화 예정
+- [x] **Phase 4**: Global RAG 및 대규모 작업 최적화 완료 🏁✨

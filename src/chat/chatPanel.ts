@@ -119,6 +119,7 @@ export class ChatPanel {
         const context: AgentContext = {
             sessionId: this.currentSessionId || 'default',
             mode: this.currentMode,
+            userInput: '', // 초기값
             history: this.chatHistory,
             workspacePath: workspaceFolder?.uri.fsPath || '',
             maxFixAttempts: 3,
@@ -772,17 +773,29 @@ export function helper() {
 
     private parseFileOperations(response: string): FileOperation[] {
         const operations: FileOperation[] = [];
-        const regex = /<<<FILE_OPERATION>>>([\s\S]*?)<<<END_OPERATION>>>/g;
+        // 태그 매칭 시 앞뒤 공백이나 대소문자에 더 유연하게 대응
+        const regex = /<<<FILE_OPERATION>>>([\s\S]*?)(?:<<<END_OPERATION>>>|$)/gi;
         let match;
 
         while ((match = regex.exec(response)) !== null) {
             const block = match[1];
             const typeMatch = block.match(/TYPE:\s*(create|edit|delete|read)/i);
-            const pathMatch = block.match(/PATH:\s*(.+)/i);
+            const pathMatch = block.match(/PATH:\s*[`'"]?([^`'"]+)[`'"]?/i);
             const descMatch = block.match(/DESCRIPTION:\s*(.+)/i);
 
-            // Flexible CONTENT parsing: matches content even if trailing backticks are missing or incomplete
-            const contentMatch = block.match(/CONTENT:\s*```[\w]*\n?([\s\S]*?)(?:```|$)/i);
+            // CONTENT 파싱 강화: 백틱 유무와 상관없이 추출 시도
+            let content: string | undefined;
+            const contentWithBackticks = block.match(/CONTENT:\s*```[\w]*\n?([\s\S]*?)(?:```|$)/i);
+
+            if (contentWithBackticks) {
+                content = contentWithBackticks[1];
+            } else {
+                // 백틱이 없는 경우 CONTENT: 다음부터 블록 끝까지(또는 다음 필드 전까지)를 내용으로 간주
+                const plainContentMatch = block.match(/CONTENT:\s*([\s\S]+)$/i);
+                if (plainContentMatch) {
+                    content = plainContentMatch[1].trim();
+                }
+            }
 
             if (typeMatch && pathMatch) {
                 const type = typeMatch[1].toLowerCase() as 'create' | 'edit' | 'delete' | 'read';
@@ -790,7 +803,7 @@ export function helper() {
                     type: type,
                     path: pathMatch[1].trim(),
                     description: descMatch ? descMatch[1].trim() : '',
-                    content: contentMatch ? contentMatch[1] : undefined,
+                    content: content,
                 });
             }
         }
@@ -807,6 +820,7 @@ export function helper() {
 
         let successCount = 0;
         let errorCount = 0;
+        const edit = new vscode.WorkspaceEdit();
 
         for (const op of this.pendingOperations) {
             try {
@@ -815,95 +829,87 @@ export function helper() {
                 switch (op.type) {
                     case 'create':
                         if (op.content !== undefined) {
-                            // Ensure directory exists
-                            const dirPath = op.path.split('/').slice(0, -1).join('/');
-                            if (dirPath) {
-                                const dirUri = vscode.Uri.joinPath(workspaceFolder.uri, dirPath);
-                                try {
-                                    await vscode.workspace.fs.createDirectory(dirUri);
-                                } catch { }
-                            }
-                            await vscode.workspace.fs.writeFile(fileUri, Buffer.from(op.content, 'utf8'));
+                            edit.createFile(fileUri, { overwrite: true, ignoreIfExists: false });
+                            edit.insert(fileUri, new vscode.Position(0, 0), op.content);
                             successCount++;
                         }
                         break;
 
                     case 'edit':
                         if (op.content !== undefined) {
-                            try {
-                                const existingData = await vscode.workspace.fs.readFile(fileUri);
-                                let existingContent = Buffer.from(existingData).toString('utf8');
+                            const existingData = await vscode.workspace.fs.readFile(fileUri);
+                            let currentContent = Buffer.from(existingData).toString('utf8');
 
-                                // Check if this is a SEARCH/REPLACE edit
-                                if (op.content.includes('<<<<<<< SEARCH')) {
-                                    const blocks = op.content.split('>>>>>>> REPLACE');
-                                    let newContent = existingContent;
-                                    let anyApplied = false;
+                            if (op.content.includes('<<<<<<< SEARCH')) {
+                                const blocks = op.content.split(/>>>>>>> REPLACE\s*/);
+                                let anyApplied = false;
 
-                                    for (const block of blocks) {
-                                        if (!block.trim()) continue;
+                                for (const block of blocks) {
+                                    if (!block.includes('<<<<<<< SEARCH')) continue;
+                                    const parts = block.split(/=======/);
+                                    if (parts.length !== 2) continue;
 
-                                        const searchParts = block.split('=======');
-                                        if (searchParts.length !== 2) continue;
+                                    const searchPart = parts[0].split(/<<<<<<< SEARCH\s*/)[1];
+                                    const replacePart = parts[1];
 
-                                        const searchContent = searchParts[0].split('<<<<<<< SEARCH')[1]?.trim();
-                                        const replaceContent = searchParts[1]?.trim();
-
-                                        if (searchContent !== undefined && replaceContent !== undefined) {
-                                            if (newContent.includes(searchContent)) {
-                                                newContent = newContent.replace(searchContent, replaceContent);
-                                                anyApplied = true;
-                                            } else {
-                                                console.warn(`Search block not found in ${op.path}:\n${searchContent}`);
-                                            }
+                                    if (searchPart && replacePart) {
+                                        const trimmedSearch = searchPart.trim();
+                                        if (currentContent.includes(trimmedSearch)) {
+                                            currentContent = currentContent.replace(trimmedSearch, replacePart.trim());
+                                            anyApplied = true;
                                         }
                                     }
-
-                                    if (anyApplied) {
-                                        await vscode.workspace.fs.writeFile(fileUri, Buffer.from(newContent, 'utf8'));
-                                        successCount++;
-                                    } else {
-                                        throw new Error(`No search blocks were found in the file: ${op.path}`);
-                                    }
-                                } else {
-                                    // Fallback to full rewrite
-                                    await vscode.workspace.fs.writeFile(fileUri, Buffer.from(op.content, 'utf8'));
-                                    successCount++;
                                 }
-                            } catch (error) {
-                                errorCount++;
-                                vscode.window.showErrorMessage(`Edit failed for ${op.path}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+
+                                if (anyApplied) {
+                                    const docLines = currentContent.split('\n').length;
+                                    edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)), currentContent);
+                                    successCount++;
+                                } else {
+                                    throw new Error(`No matching SEARCH blocks found in ${op.path}`);
+                                }
+                            } else {
+                                const docLines = currentContent.split('\n').length;
+                                edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)), op.content);
+                                successCount++;
                             }
                         }
                         break;
 
                     case 'delete':
-                        await vscode.workspace.fs.delete(fileUri);
+                        edit.deleteFile(fileUri, { ignoreIfNotExists: true });
                         successCount++;
                         break;
                 }
             } catch (error) {
                 errorCount++;
-                console.error(`Failed to ${op.type} ${op.path}:`, error);
+                console.error(`Failed to stage ${op.type} for ${op.path}:`, error);
+            }
+        }
+
+        // 일괄 실행
+        const success = await vscode.workspace.applyEdit(edit);
+
+        if (success) {
+            if (successCount > 0) {
+                vscode.window.showInformationMessage(`Successfully applied ${successCount} file operation(s).`);
+            }
+        } else {
+            console.error('[ChatPanel] WorkspaceEdit failed. Check for read-only files or conflicting edits.');
+            if (successCount > 0) {
+                vscode.window.showErrorMessage(`Failed to apply ${successCount} operation(s) via WorkspaceEdit. Please verify file permissions.`);
+            } else if (errorCount > 0) {
+                vscode.window.showErrorMessage(`Failed to stage ${errorCount} operation(s). Check the console (Developer Tools) for details.`);
             }
         }
 
         this.pendingOperations = [];
         this.panel.webview.postMessage({ command: 'operationsCleared' });
-
-        if (successCount > 0) {
-            vscode.window.showInformationMessage(`Applied ${successCount} file operation(s)`);
-        }
-        if (errorCount > 0) {
-            vscode.window.showErrorMessage(`Failed to apply ${errorCount} operation(s)`);
-        }
     }
 
     private async previewFileOperation(index: number): Promise<void> {
         const operation = this.pendingOperations[index];
-        if (!operation) {
-            return;
-        }
+        if (!operation) return;
 
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (!workspaceFolder) {
@@ -915,29 +921,16 @@ export function helper() {
 
         try {
             if (operation.type === 'create') {
-                // Show proposed content vs empty
-                const emptyUri = vscode.Uri.parse(`untitled:empty`);
+                const emptyUri = vscode.Uri.parse('untitled:empty');
                 const proposedUri = vscode.Uri.parse(`tokamak-preview:${operation.path}`);
-
-                // Register content provider for the preview
                 const proposedContent = operation.content || '';
 
                 const provider = new (class implements vscode.TextDocumentContentProvider {
-                    provideTextDocumentContent(): string {
-                        return proposedContent;
-                    }
+                    provideTextDocumentContent(): string { return proposedContent; }
                 })();
 
                 const disposable = vscode.workspace.registerTextDocumentContentProvider('tokamak-preview', provider);
-
-                await vscode.commands.executeCommand(
-                    'vscode.diff',
-                    emptyUri,
-                    proposedUri,
-                    `[CREATE] ${operation.path}`
-                );
-
-                // Clean up after a delay
+                await vscode.commands.executeCommand('vscode.diff', emptyUri, proposedUri, `[CREATE] ${operation.path}`);
                 setTimeout(() => disposable.dispose(), 5000);
 
             } else if (operation.type === 'edit') {
@@ -946,7 +939,6 @@ export function helper() {
                     const existingContent = Buffer.from(existingData).toString('utf8');
                     let proposedContent = operation.content || '';
 
-                    // If SEARCH/REPLACE format, calculate what the final file would look like
                     if (proposedContent.includes('<<<<<<< SEARCH')) {
                         const blocks = proposedContent.split('>>>>>>> REPLACE');
                         let result = existingContent;
@@ -966,27 +958,18 @@ export function helper() {
                     }
 
                     const provider = new (class implements vscode.TextDocumentContentProvider {
-                        provideTextDocumentContent(): string {
-                            return proposedContent;
-                        }
+                        provideTextDocumentContent(): string { return proposedContent; }
                     })();
 
                     const disposable = vscode.workspace.registerTextDocumentContentProvider('tokamak-preview', provider);
                     const proposedUri = vscode.Uri.parse(`tokamak-preview:${operation.path}`);
 
-                    await vscode.commands.executeCommand(
-                        'vscode.diff',
-                        fileUri,
-                        proposedUri,
-                        `[EDIT] ${operation.path}`
-                    );
-
+                    await vscode.commands.executeCommand('vscode.diff', fileUri, proposedUri, `[EDIT] ${operation.path}`);
                     setTimeout(() => disposable.dispose(), 5000);
                 } catch (error) {
                     vscode.window.showErrorMessage(`Preview failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
                 }
             } else if (operation.type === 'delete') {
-                // Show current content (will be deleted)
                 await vscode.window.showTextDocument(fileUri, { preview: true });
                 vscode.window.showWarningMessage(`This file will be deleted: ${operation.path}`);
             }
@@ -996,13 +979,36 @@ export function helper() {
     }
 
     private async handleUserMessage(text: string, attachedFiles: string[], attachedImages: string[] = []): Promise<void> {
+        if (!text && attachedFiles.length === 0 && attachedImages.length === 0) return;
+
+        // [Phase 4] 엔진에 사용자 입력 업데이트
+        if (this.agentEngine) {
+            this.agentEngine.updateContext({ userInput: text });
+        }
+
+        const messageId = Date.now().toString();
         if (!(await isConfigured())) {
             const configured = await promptForConfiguration();
             if (!configured) {
                 this.panel.webview.postMessage({
                     command: 'addMessage',
                     role: 'assistant',
-                    content: '⚙️ **설정이 필요합니다**\n\nTokamak AI를 사용하려면 API 설정이 필요합니다.\n\n**설정 방법:**\n1. `Cmd+,` (Mac) / `Ctrl+,` (Windows)로 설정 열기\n2. `tokamak` 검색\n3. `API Key`와 `Base URL` 입력\n\n또는 `Cmd+Shift+P` → "Preferences: Open Settings (JSON)"에서:\n```json\n{\n  "tokamak.apiKey": "your-api-key",\n  "tokamak.baseUrl": "https://your-api.com/v1"\n}\n```',
+                    content: `⚙️ **설정이 필요합니다**
+
+Tokamak AI를 사용하려면 API 설정이 필요합니다.
+
+**설정 방법:**
+1. \`Cmd + ,\` (Mac) / \`Ctrl + ,\` (Windows)로 설정 열기
+2. \`tokamak\` 검색
+3. \`API Key\`와 \`Base URL\` 입력
+
+또는 \`Cmd + Shift + P\` → "Preferences: Open Settings (JSON)"에서:
+\`\`\`json
+{
+  "tokamak.apiKey": "your-api-key",
+  "tokamak.baseUrl": "https://your-api.com/v1"
+}
+\`\`\``,
                 });
                 return;
             }
@@ -1019,7 +1025,7 @@ export function helper() {
         let processedText = text;
         if (slashCommand) {
             processedText = remainingText
-                ? `${slashCommand.prompt}\n\nAdditional context: ${remainingText}`
+                ? `${slashCommand.prompt} \n\nAdditional context: ${remainingText} `
                 : slashCommand.prompt;
         }
 
@@ -1029,7 +1035,7 @@ export function helper() {
         }
 
         const editorContext = (attachedFiles.length === 0 && attachedImages.length === 0) ? this.getEditorContext() : '';
-        const userMessageWithContext = `${processedText}${fileContexts}${editorContext}`;
+        const userMessageWithContext = `${processedText}${fileContexts}${editorContext} `;
 
         // Create multimodal content if images are present
         let content: string | any[] = userMessageWithContext;
@@ -1046,7 +1052,7 @@ export function helper() {
         this.chatHistory.push({ role: 'user', content: content });
 
         const displayText = (attachedFiles.length > 0 || attachedImages.length > 0)
-            ? `${text}${attachedFiles.length > 0 ? `\n\n📎 ${attachedFiles.join(', ')}` : ''}${attachedImages.length > 0 ? `\n\n🖼️ ${attachedImages.length} images attached (pasted)` : ''}`
+            ? `${text}${attachedFiles.length > 0 ? `\n\n📎 ${attachedFiles.join(', ')}` : ''}${attachedImages.length > 0 ? `\n\n🖼️ ${attachedImages.length} images attached (pasted)` : ''} `
             : text;
 
         // Send user message to UI
@@ -1125,7 +1131,8 @@ export function helper() {
 
                 // Handle other operations (create/edit/delete) via UI
                 const writeOps = operations.filter(op => op.type !== 'read');
-                if (writeOps.length > 0 && this.currentMode === 'agent') {
+                if (writeOps.length > 0) {
+                    // Agent 모드가 아니더라도 Plan 모드 등에서 작업이 있으면 제안할 수 있도록 함
                     this.pendingOperations = writeOps;
                     this.panel.webview.postMessage({
                         command: 'showOperations',
@@ -1175,7 +1182,7 @@ export function helper() {
                     this.panel.webview.postMessage({
                         command: 'addMessage',
                         role: 'assistant',
-                        content: `❌ **오류 발생**\n\n${error.message}\n\n문제가 계속되면 설정을 확인해주세요.`,
+                        content: `❌ ** 오류 발생 **\n\n${error.message} \n\n문제가 계속되면 설정을 확인해주세요.`,
                     });
                 }
             } else {
@@ -1551,7 +1558,7 @@ export function helper() {
             position: absolute;
             top: 2px;
             right: 2px;
-            background: rgba(0,0,0,0.6);
+            background: rgba(0, 0, 0, 0.6);
             color: white;
             border-radius: 50%;
             width: 16px;
@@ -1642,7 +1649,7 @@ export function helper() {
             border: 1px solid var(--vscode-dropdown-border);
             border-radius: 6px;
             margin-bottom: 5px;
-            box-shadow: 0 -4px 12px rgba(0,0,0,0.2);
+            box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.2);
         }
         #autocomplete.visible {
             display: block;
@@ -1794,7 +1801,7 @@ export function helper() {
         #reject-btn {
             background-color: transparent;
             color: var(--vscode-foreground);
-            border: 1px solid var(--vscode-widget-border) !important;
+            border: 1px solid var(--vscode-widget-border)!important;
         }
 
         /* Sessions History Panel */
@@ -1810,7 +1817,7 @@ export function helper() {
             transition: left 0.3s ease;
             display: flex;
             flex-direction: column;
-            box-shadow: 2px 0 10px rgba(0,0,0,0.2);
+            box-shadow: 2px 0 10px rgba(0, 0, 0, 0.2);
         }
         #history-panel.visible {
             left: 0;
@@ -1879,7 +1886,7 @@ export function helper() {
             left: 0;
             right: 0;
             bottom: 0;
-            background: rgba(0,0,0,0.3);
+            background: rgba(0, 0, 0, 0.3);
             z-index: 999;
         }
         #history-overlay.visible {
@@ -1980,7 +1987,7 @@ export function helper() {
             <div style="flex:1"></div>
             <h3>Tokamak AI</h3>
             <div style="flex:1"></div>
-            <label for="model-select" style="font-size: 0.8em; opacity: 0.7;">Model:</label>
+            <label for="model-select" style="font-size: 0.8em; opacity: 0.7;">Model: </label>
             <select id="model-select"></select>
             <button id="new-chat-btn" title="Start new conversation">+ New</button>
         </div>
@@ -2022,98 +2029,98 @@ export function helper() {
         <div class="hint">💡 Type <strong>/</strong> for commands, <strong>@</strong> to attach files</div>
     </div>
 
-    <script>
-    (function() {
-        // Prevent duplicate initialization
-        if (window._tokamakInitialized) {
-            return;
-        }
-        window._tokamakInitialized = true;
+                                                                                                                                                                                                <script>
+                                                                                                                                                                                                (function () {
+                                                                                                                                                                                                    // Prevent duplicate initialization
+                                                                                                                                                                                                    if (window._tokamakInitialized) {
+                                                                                                                                                                                                        return;
+                                                                                                                                                                                                    }
+                                                                                                                                                                                                    window._tokamakInitialized = true;
 
-        const vscode = acquireVsCodeApi();
-        const chatContainer = document.getElementById('chat-container');
-        const messageInput = document.getElementById('message-input');
-        const sendBtn = document.getElementById('send-btn');
-        const stopBtn = document.getElementById('stop-btn');
-        const typingIndicator = document.getElementById('typing-indicator');
-        const modelSelect = document.getElementById('model-select');
-        const autocomplete = document.getElementById('autocomplete');
-        const attachedFilesContainer = document.getElementById('attached-files');
-        const modeTabs = document.querySelectorAll('.mode-tab');
-        const modeDescription = document.getElementById('mode-description');
-        const operationsPanel = document.getElementById('operations-panel');
-        const operationsList = document.getElementById('operations-list');
-        const applyBtn = document.getElementById('apply-btn');
-        const rejectBtn = document.getElementById('reject-btn');
-        const newChatBtn = document.getElementById('new-chat-btn');
-        const historyBtn = document.getElementById('history-btn');
-        const historyPanel = document.getElementById('history-panel');
-        const historyList = document.getElementById('history-list');
-        const historyOverlay = document.getElementById('history-overlay');
-        const closeHistoryBtn = document.getElementById('close-history');
-        const planPanel = document.getElementById('plan-panel');
-        const planList = document.getElementById('plan-list');
-        const agentStatusBadge = document.getElementById('agent-status');
+                                                                                                                                                                                                    const vscode = acquireVsCodeApi();
+                                                                                                                                                                                                    const chatContainer = document.getElementById('chat-container');
+                                                                                                                                                                                                    const messageInput = document.getElementById('message-input');
+                                                                                                                                                                                                    const sendBtn = document.getElementById('send-btn');
+                                                                                                                                                                                                    const stopBtn = document.getElementById('stop-btn');
+                                                                                                                                                                                                    const typingIndicator = document.getElementById('typing-indicator');
+                                                                                                                                                                                                    const modelSelect = document.getElementById('model-select');
+                                                                                                                                                                                                    const autocomplete = document.getElementById('autocomplete');
+                                                                                                                                                                                                    const attachedFilesContainer = document.getElementById('attached-files');
+                                                                                                                                                                                                    const modeTabs = document.querySelectorAll('.mode-tab');
+                                                                                                                                                                                                    const modeDescription = document.getElementById('mode-description');
+                                                                                                                                                                                                    const operationsPanel = document.getElementById('operations-panel');
+                                                                                                                                                                                                    const operationsList = document.getElementById('operations-list');
+                                                                                                                                                                                                    const applyBtn = document.getElementById('apply-btn');
+                                                                                                                                                                                                    const rejectBtn = document.getElementById('reject-btn');
+                                                                                                                                                                                                    const newChatBtn = document.getElementById('new-chat-btn');
+                                                                                                                                                                                                    const historyBtn = document.getElementById('history-btn');
+                                                                                                                                                                                                    const historyPanel = document.getElementById('history-panel');
+                                                                                                                                                                                                    const historyList = document.getElementById('history-list');
+                                                                                                                                                                                                    const historyOverlay = document.getElementById('history-overlay');
+                                                                                                                                                                                                    const closeHistoryBtn = document.getElementById('close-history');
+                                                                                                                                                                                                    const planPanel = document.getElementById('plan-panel');
+                                                                                                                                                                                                    const planList = document.getElementById('plan-list');
+                                                                                                                                                                                                    const agentStatusBadge = document.getElementById('agent-status');
 
-        let currentStreamingMessage = null;
-        let streamingContent = '';
-        let typingInterval = null;
-        let attachedFiles = [];
-        let autocompleteFiles = [];
-        let autocompleteCommands = [];
-        let autocompleteType = 'file'; // 'file' or 'command'
-        let selectedAutocompleteIndex = 0;
-        let mentionStartIndex = -1;
-        let slashStartIndex = -1;
-        let currentMode = 'ask';
-        let attachedImages = []; // Array of base64 strings
+                                                                                                                                                                                                    let currentStreamingMessage = null;
+                                                                                                                                                                                                    let streamingContent = '';
+                                                                                                                                                                                                    let typingInterval = null;
+                                                                                                                                                                                                    let attachedFiles = [];
+                                                                                                                                                                                                    let autocompleteFiles = [];
+                                                                                                                                                                                                    let autocompleteCommands = [];
+                                                                                                                                                                                                    let autocompleteType = 'file'; // 'file' or 'command'
+                                                                                                                                                                                                    let selectedAutocompleteIndex = 0;
+                                                                                                                                                                                                    let mentionStartIndex = -1;
+                                                                                                                                                                                                    let slashStartIndex = -1;
+                                                                                                                                                                                                    let currentMode = 'ask';
+                                                                                                                                                                                                    let attachedImages = []; // Array of base64 strings
 
-        function addImageTag(base64Data) {
-            const tag = document.createElement('div');
-            tag.className = 'image-tag';
-            tag.innerHTML = '<img src="' + base64Data + '"><span class="remove-img">×</span>';
-            
-            tag.querySelector('.remove-img').onclick = () => {
-                const index = attachedImages.indexOf(base64Data);
-                if (index > -1) {
-                    attachedImages.splice(index, 1);
-                }
-                tag.remove();
-            };
-            
-            attachedFilesContainer.appendChild(tag);
-            attachedImages.push(base64Data);
-        }
+                                                                                                                                                                                                    function addImageTag(base64Data) {
+                                                                                                                                                                                                        const tag = document.createElement('div');
+                                                                                                                                                                                                        tag.className = 'image-tag';
+                                                                                                                                                                                                        tag.innerHTML = '<img src="' + base64Data + '"><span class="remove-img">×</span>';
 
-        const modeDescriptions = {
-            ask: 'Ask questions about your code',
-            plan: 'Plan your implementation without code changes',
-            agent: 'AI will create, edit, and delete files for you'
-        };
+                                                                                                                                                                                                        tag.querySelector('.remove-img').onclick = () => {
+                                                                                                                                                                                                            const index = attachedImages.indexOf(base64Data);
+                                                                                                                                                                                                            if (index > -1) {
+                                                                                                                                                                                                                attachedImages.splice(index, 1);
+                                                                                                                                                                                                            }
+                                                                                                                                                                                                            tag.remove();
+                                                                                                                                                                                                        };
 
-        const modePlaceholders = {
-            ask: 'Ask about your code... Type @ to attach files',
-            plan: 'Describe what you want to build...',
-            agent: 'Tell me what to implement...'
-        };
+                                                                                                                                                                                                        attachedFilesContainer.appendChild(tag);
+                                                                                                                                                                                                        attachedImages.push(base64Data);
+                                                                                                                                                                                                    }
 
-        vscode.postMessage({ command: 'ready' });
+                                                                                                                                                                                                    const modeDescriptions = {
+                                                                                                                                                                                                        ask: 'Ask questions about your code',
+                                                                                                                                                                                                        plan: 'Plan your implementation without code changes',
+                                                                                                                                                                                                        agent: 'AI will create, edit, and delete files for you'
+                                                                                                                                                                                                    };
 
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
+                                                                                                                                                                                                    const modePlaceholders = {
+                                                                                                                                                                                                        ask: 'Ask about your code... Type @ to attach files',
+                                                                                                                                                                                                        plan: 'Describe what you want to build...',
+                                                                                                                                                                                                        agent: 'Tell me what to implement...'
+                                                                                                                                                                                                    };
 
-        function parseMarkdown(text) {
-            let result = escapeHtml(text);
-            // Hide file operation blocks in display
-            result = result.replace(/&lt;&lt;&lt;FILE_OPERATION&gt;&gt;&gt;[\\s\\S]*?&lt;&lt;&lt;END_OPERATION&gt;&gt;&gt;/g, '');
-            result = result.replace(/\`\`\`(\\w*)\\n([\\s\\S]*?)\`\`\`/g, (match, lang, code) => {
-                const escapedCode = code.trim();
-                const langLabel = lang || 'code';
-                const isShell = ['bash', 'shell', 'sh', 'zsh', 'powershell', 'cmd'].includes(lang.toLowerCase());
-                const runBtn = isShell ? \`<button class="run-btn" onclick="runCommand(this)">▶ Run</button>\` : '';
+                                                                                                                                                                                                    vscode.postMessage({ command: 'ready' });
+
+                                                                                                                                                                                                    function escapeHtml(text) {
+                                                                                                                                                                                                        const div = document.createElement('div');
+                                                                                                                                                                                                        div.textContent = text;
+                                                                                                                                                                                                        return div.innerHTML;
+                                                                                                                                                                                                    }
+
+                                                                                                                                                                                                    function parseMarkdown(text) {
+                                                                                                                                                                                                        let result = escapeHtml(text);
+                                                                                                                                                                                                        // Hide file operation blocks in display
+                                                                                                                                                                                                        result = result.replace(/&lt;&lt;&lt;FILE_OPERATION&gt;&gt;&gt;[\\s\\S]*?&lt;&lt;&lt;END_OPERATION&gt;&gt;&gt;/g, '');
+                                                                                                                                                                                                        result = result.replace(/\`\`\`(\\w*)\\n([\\s\\S]*?)\`\`\`/g, (match, lang, code) => {
+                                                                                                                                                                                                            const escapedCode = code.trim();
+                                                                                                                                                                                                            const langLabel = lang || 'code';
+                                                                                                                                                                                                            const isShell = ['bash', 'shell', 'sh', 'zsh', 'powershell', 'cmd'].includes(lang.toLowerCase());
+                                                                                                                                                                                                            const runBtn = isShell ?\`<button class="run-btn" onclick="runCommand(this)">▶ Run</button>\` : '';
                 return \`<div class="code-header"><span>\${langLabel}</span><div><button class="insert-btn" onclick="insertCode(this)">Insert</button>\${runBtn}</div></div><pre><code class="language-\${lang}">\${escapedCode}</code></pre>\`;
             });
             result = result.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
