@@ -780,7 +780,7 @@ export function helper() {
         while ((match = regex.exec(response)) !== null) {
             const block = match[1];
             const typeMatch = block.match(/TYPE:\s*(create|edit|delete|read)/i);
-            const pathMatch = block.match(/PATH:\s*[`'"]?([^`'"]+)[`'"]?/i);
+            const pathMatch = block.match(/PATH:\s*[`'"]?([^`'"\n\r]+)[`'"]?/i);
             const descMatch = block.match(/DESCRIPTION:\s*(.+)/i);
 
             // CONTENT 파싱 강화: 백틱 유무와 상관없이 추출 시도
