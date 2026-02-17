@@ -542,6 +542,31 @@ export class ChatPanel {
         }
     }
 
+    private getLanguageFromPath(filePath: string): string {
+        const ext = filePath.split('.').pop()?.toLowerCase() || '';
+        const languageMap: { [key: string]: string } = {
+            'ts': 'typescript',
+            'tsx': 'typescript',
+            'js': 'javascript',
+            'jsx': 'javascript',
+            'py': 'python',
+            'go': 'go',
+            'java': 'java',
+            'cpp': 'cpp',
+            'c': 'c',
+            'h': 'c',
+            'md': 'markdown',
+            'json': 'json',
+            'yaml': 'yaml',
+            'yml': 'yaml',
+            'html': 'html',
+            'css': 'css',
+            'sh': 'bash',
+            'rs': 'rust',
+        };
+        return languageMap[ext] || ext;
+    }
+
     private getEditorContext(): string {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
@@ -1051,9 +1076,20 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
 
         this.chatHistory.push({ role: 'user', content: content });
 
-        const displayText = (attachedFiles.length > 0 || attachedImages.length > 0)
-            ? `${text}${attachedFiles.length > 0 ? `\n\n📎 ${attachedFiles.join(', ')}` : ''}${attachedImages.length > 0 ? `\n\n🖼️ ${attachedImages.length} images attached (pasted)` : ''} `
-            : text;
+        // 첨부된 파일 내용을 채팅창에 표시
+        let displayText = text;
+        if (attachedFiles.length > 0) {
+            displayText += '\n\n';
+            for (const filePath of attachedFiles) {
+                const fileContent = await this.getFileContent(filePath);
+                // 파일 내용을 코드 블록으로 감싸서 표시
+                const language = this.getLanguageFromPath(filePath);
+                displayText += `\n\n**📎 ${filePath}**\n\`\`\`${language}\n${fileContent.replace(/^---.*?---\n/s, '').trim()}\n\`\`\`\n`;
+            }
+        }
+        if (attachedImages.length > 0) {
+            displayText += `\n\n🖼️ ${attachedImages.length} images attached (pasted)`;
+        }
 
         // Send user message to UI
         this.panel.webview.postMessage({ command: 'addMessage', role: 'user', content: displayText });
