@@ -4,7 +4,14 @@
     {
       "type": "npm",
       "script": "watch",
-      "problemMatcher": "$tsc-watch",
+      "problemMatcher": {
+        "base": "$tsc-watch",
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\s*\\d{1,2}:\\d{2}:\\d{2}(?: AM| PM)? - File change detected\\. Starting incremental compilation\\.\\.\\.",
+          "endsPattern": "^\\s*\\d{1,2}:\\d{2}:\\d{2}(?: AM| PM)? - (?:Compilation complete|Found \\d+ errors?)\\. Watching for file changes\\."
+        }
+      },
       "isBackground": true,
       "presentation": {
         "reveal": "never"

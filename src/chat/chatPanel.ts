@@ -158,7 +158,7 @@ export class ChatPanel {
             case 'getSessions':
                 this.panel.webview.postMessage({
                     command: 'sessionsList',
-                    sessions: this.sessions.map(s => ({ id: s.id, title: s.title, timestamp: s.timestamp })),
+                    sessions: this.sessions.map(s => ({ id: s.id, title: s.title, timestamp: s.timestamp, mode: s.mode })),
                     currentSessionId: this.currentSessionId
                 });
                 break;
@@ -183,9 +183,12 @@ export class ChatPanel {
                 }
                 this.panel.webview.postMessage({
                     command: 'sessionsList',
-                    sessions: this.sessions.map(s => ({ id: s.id, title: s.title, timestamp: s.timestamp })),
+                    sessions: this.sessions.map(s => ({ id: s.id, title: s.title, timestamp: s.timestamp, mode: s.mode })),
                     currentSessionId: this.currentSessionId
                 });
+                break;
+            case 'exportSession':
+                await this.exportSession(message.sessionId);
                 break;
             case 'searchFiles':
                 await this.searchFiles(message.query);
@@ -345,6 +348,50 @@ export class ChatPanel {
                     content: message.content,
                 });
             }
+        }
+    }
+
+    private async exportSession(sessionId: string): Promise<void> {
+        const session = this.sessions.find(s => s.id === sessionId);
+        if (!session) {
+            vscode.window.showErrorMessage('Session not found');
+            return;
+        }
+
+        try {
+            // Format session data as JSON
+            const exportData = {
+                title: session.title,
+                mode: session.mode,
+                timestamp: session.timestamp,
+                date: new Date(session.timestamp).toISOString(),
+                messages: session.messages.map(msg => ({
+                    role: msg.role,
+                    content: typeof msg.content === 'string' ? msg.content : 
+                             Array.isArray(msg.content) ? msg.content.map((item: any) => 
+                                 item.type === 'text' ? item.text : item
+                             ).join('') : JSON.stringify(msg.content)
+                }))
+            };
+
+            const jsonContent = JSON.stringify(exportData, null, 2);
+            
+            // Show save dialog
+            const uri = await vscode.window.showSaveDialog({
+                defaultUri: vscode.Uri.file(`tokamak-chat-${session.title.replace(/[^a-z0-9]/gi, '-')}-${sessionId}.json`),
+                filters: {
+                    'JSON': ['json'],
+                    'All Files': ['*']
+                },
+                saveLabel: 'Export'
+            });
+
+            if (uri) {
+                await vscode.workspace.fs.writeFile(uri, Buffer.from(jsonContent, 'utf8'));
+                vscode.window.showInformationMessage(`Conversation exported to ${uri.fsPath}`);
+            }
+        } catch (error) {
+            vscode.window.showErrorMessage(`Failed to export session: ${error}`);
         }
     }
 
@@ -1958,6 +2005,27 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             justify-content: space-between;
             align-items: center;
         }
+        #history-search {
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--vscode-widget-border);
+            background-color: var(--vscode-input-background);
+        }
+        #history-search-input {
+            width: 100%;
+            padding: 6px 10px;
+            border: 1px solid var(--vscode-input-border);
+            background-color: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border-radius: 4px;
+            font-family: inherit;
+            font-size: 0.85em;
+        }
+        #history-search-input:focus {
+            outline: 1px solid var(--vscode-focusBorder);
+        }
+        #history-search-input::placeholder {
+            color: var(--vscode-input-placeholderForeground);
+        }
         #history-list {
             flex: 1;
             overflow-y: auto;
@@ -1991,22 +2059,56 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
         .session-date {
             font-size: 0.75em;
             opacity: 0.6;
+            margin-bottom: 4px;
         }
-        .delete-session {
+        .session-mode {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.7em;
+            font-weight: 600;
+            margin-top: 4px;
+        }
+        .session-mode.ask {
+            background-color: var(--vscode-charts-blue);
+            color: white;
+        }
+        .session-mode.plan {
+            background-color: var(--vscode-charts-yellow);
+            color: black;
+        }
+        .session-mode.agent {
+            background-color: var(--vscode-charts-green);
+            color: white;
+        }
+        .session-actions {
             position: absolute;
             right: 10px;
             top: 50%;
             transform: translateY(-50%);
+            display: flex;
+            gap: 4px;
             opacity: 0;
+            transition: opacity 0.2s;
+        }
+        .session-item:hover .session-actions {
+            opacity: 1;
+        }
+        .delete-session, .export-session {
             cursor: pointer;
             padding: 4px;
+            font-size: 0.9em;
+            opacity: 0.7;
+            transition: opacity 0.2s;
         }
-        .session-item:hover .delete-session {
-            opacity: 0.6;
-        }
-        .session-item .delete-session:hover {
+        .delete-session:hover, .export-session:hover {
             opacity: 1;
+        }
+        .delete-session:hover {
             color: var(--vscode-errorForeground);
+        }
+        .export-session:hover {
+            color: var(--vscode-textLink-foreground);
         }
         #history-overlay {
             display: none;
@@ -2108,6 +2210,9 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             <h4>Chat History</h4>
             <button id="close-history" style="background:none; border:none; color:inherit; cursor:pointer; font-size:1.4em;">×</button>
         </div>
+        <div id="history-search">
+            <input type="text" id="history-search-input" placeholder="Search conversations...">
+        </div>
         <div id="history-list"></div>
     </div>
     <div id="header">
@@ -2193,6 +2298,7 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             const historyList = document.getElementById('history-list');
             const historyOverlay = document.getElementById('history-overlay');
             const closeHistoryBtn = document.getElementById('close-history');
+            const historySearchInput = document.getElementById('history-search-input');
             const planPanel = document.getElementById('plan-panel');
             const planList = document.getElementById('plan-list');
             const agentStatusBadge = document.getElementById('agent-status');
@@ -2611,31 +2717,78 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             const closeHistory = () => {
             historyPanel.classList.remove('visible');
             historyOverlay.classList.remove('visible');
+            if (historySearchInput) {
+            historySearchInput.value = '';
+            }
             };
 
             closeHistoryBtn.addEventListener('click', closeHistory);
             historyOverlay.addEventListener('click', closeHistory);
 
+            if (historySearchInput) {
+            historySearchInput.addEventListener('input', () => {
+            filterSessions();
+            });
+            }
+
+            let allSessions = [];
+            let currentSessionId = null;
+
             function renderSessions(sessions, currentId) {
-            historyList.innerHTML = sessions.map(s => {
+            allSessions = sessions;
+            currentSessionId = currentId;
+            filterSessions();
+            }
+
+            function filterSessions() {
+            const searchInput = document.getElementById('history-search-input');
+            const query = searchInput ? searchInput.value.toLowerCase().trim() : '';
+            
+            const filtered = query ? allSessions.filter(s => {
+            const title = (s.title || 'New Conversation').toLowerCase();
+            const date = new Date(s.timestamp).toLocaleString().toLowerCase();
+            return title.includes(query) || date.includes(query);
+            }) : allSessions;
+
+            historyList.innerHTML = filtered.map(s => {
             const date = new Date(s.timestamp).toLocaleString();
-            const activeClass = s.id === currentId ? 'active' : '';
+            const activeClass = s.id === currentSessionId ? 'active' : '';
             const title = s.title || 'New Conversation';
+            const mode = s.mode || 'ask';
+            const modeLabel = mode === 'ask' ? 'ASK' : mode === 'plan' ? 'PLAN' : 'AGENT';
             return '<div class="session-item ' + activeClass + '" data-id="' + s.id + '">' +
-            '<div class="session-title">' + title + '</div>' +
-            '<div class="session-date">' + date + '</div>' +
-            '<span class="delete-session" data-id="' + s.id + '">🗑️</span>' +
+            '<div class="session-title">' + escapeHtml(title) + '</div>' +
+            '<div class="session-date">' + escapeHtml(date) + '</div>' +
+            '<span class="session-mode ' + mode + '">' + modeLabel + '</span>' +
+            '<div class="session-actions">' +
+            '<span class="export-session" data-id="' + s.id + '" title="Export conversation">📥</span>' +
+            '<span class="delete-session" data-id="' + s.id + '" title="Delete conversation">🗑️</span>' +
+            '</div>' +
             '</div>';
             }).join('');
 
             historyList.querySelectorAll('.session-item').forEach(item => {
             item.addEventListener('click', (e) => {
-            if (e.target.classList.contains('delete-session')) {
-            vscode.postMessage({ command: 'deleteSession', sessionId: e.target.dataset.id });
+            if (e.target.classList.contains('delete-session') || e.target.classList.contains('export-session')) {
+            return; // Handled by separate click handlers
             } else {
             vscode.postMessage({ command: 'loadSession', sessionId: item.dataset.id });
             closeHistory();
             }
+            });
+            });
+
+            historyList.querySelectorAll('.delete-session').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            vscode.postMessage({ command: 'deleteSession', sessionId: btn.dataset.id });
+            });
+            });
+
+            historyList.querySelectorAll('.export-session').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            vscode.postMessage({ command: 'exportSession', sessionId: btn.dataset.id });
             });
             });
             }
