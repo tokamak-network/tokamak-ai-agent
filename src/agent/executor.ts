@@ -122,10 +122,36 @@ export class Executor {
     }
 
     private async runTerminal(command: string): Promise<string> {
-        // [Phase 3] 터미널 결과를 캡처하는 로직 고도화 예정
-        const terminal = vscode.window.createTerminal('Tokamak Executor');
-        terminal.show();
-        terminal.sendText(command);
-        return `Command sent to terminal: ${command}`;
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        if (!workspaceFolder) {
+            throw new Error('No workspace folder open');
+        }
+
+        return new Promise((resolve) => {
+            const { exec } = require('child_process');
+            const cwd = workspaceFolder.uri.fsPath;
+
+            exec(command, { cwd, timeout: 30000, maxBuffer: 1024 * 1024 }, (error: any, stdout: string, stderr: string) => {
+                let result = '';
+
+                if (stdout) {
+                    result += `[STDOUT]\n${stdout}\n`;
+                }
+
+                if (stderr) {
+                    result += `[STDERR]\n${stderr}\n`;
+                }
+
+                if (error) {
+                    result += `[ERROR] Exit code: ${error.code}\n${error.message}\n`;
+                }
+
+                if (!result) {
+                    result = '(Command executed with no output)';
+                }
+
+                resolve(result);
+            });
+        });
     }
 }

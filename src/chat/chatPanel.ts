@@ -227,7 +227,7 @@ export class ChatPanel {
                 await this.resolveFilePath(message.uri);
                 break;
             case 'runCommand':
-                await this.runInTerminal(message.command);
+                await this.runInTerminal(message.commandText);
                 break;
             case 'stopGeneration':
                 this.stopGeneration();
@@ -1210,13 +1210,69 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
     }
 
     private async runInTerminal(command: string): Promise<void> {
-        // Find existing Tokamak terminal or create new one
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        if (!workspaceFolder) {
+            vscode.window.showErrorMessage('No workspace folder open');
+            return;
+        }
+
+        // Show terminal for user visibility
         let terminal = vscode.window.terminals.find(t => t.name === 'Tokamak');
         if (!terminal) {
             terminal = vscode.window.createTerminal('Tokamak');
         }
         terminal.show();
         terminal.sendText(command);
+
+        // Execute and capture output
+        vscode.window.showInformationMessage(`Running: ${command}`);
+
+        try {
+            const { exec } = require('child_process');
+            const cwd = workspaceFolder.uri.fsPath;
+
+            const result = await new Promise<string>((resolve) => {
+                exec(command, { cwd, timeout: 30000, maxBuffer: 1024 * 1024 }, (error: any, stdout: string, stderr: string) => {
+                    let output = '';
+
+                    if (stdout) {
+                        output += `[STDOUT]\n${stdout}\n`;
+                    }
+
+                    if (stderr) {
+                        output += `[STDERR]\n${stderr}\n`;
+                    }
+
+                    if (error) {
+                        output += `[ERROR] Exit code: ${error.code}\n${error.message}\n`;
+                    }
+
+                    if (!output) {
+                        output = '(Command executed with no output)';
+                    }
+
+                    resolve(output);
+                });
+            });
+
+            // Send result to AI automatically
+            this.panel.webview.postMessage({
+                command: 'addMessage',
+                role: 'assistant',
+                content: `**Command executed:** \`${command}\`\n\n**Result:**\n\`\`\`\n${result}\n\`\`\``,
+            });
+
+            // Add to history
+            this.chatHistory.push({
+                role: 'assistant',
+                content: `Command: ${command}\nResult:\n${result}`,
+            });
+
+            this.saveChatHistory();
+        } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+            vscode.window.showErrorMessage(`Command failed: ${errorMsg}`);
+        }
     }
 
     private stopGeneration(): void {
@@ -2030,106 +2086,107 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
     </div>
 
                                                                                                                                                                                                 <script>
-                                                                                                                                                                                                (function () {
-                                                                                                                                                                                                    // Prevent duplicate initialization
-                                                                                                                                                                                                    if (window._tokamakInitialized) {
-                                                                                                                                                                                                        return;
-                                                                                                                                                                                                    }
-                                                                                                                                                                                                    window._tokamakInitialized = true;
 
-                                                                                                                                                                                                    const vscode = acquireVsCodeApi();
-                                                                                                                                                                                                    const chatContainer = document.getElementById('chat-container');
-                                                                                                                                                                                                    const messageInput = document.getElementById('message-input');
-                                                                                                                                                                                                    const sendBtn = document.getElementById('send-btn');
-                                                                                                                                                                                                    const stopBtn = document.getElementById('stop-btn');
-                                                                                                                                                                                                    const typingIndicator = document.getElementById('typing-indicator');
-                                                                                                                                                                                                    const modelSelect = document.getElementById('model-select');
-                                                                                                                                                                                                    const autocomplete = document.getElementById('autocomplete');
-                                                                                                                                                                                                    const attachedFilesContainer = document.getElementById('attached-files');
-                                                                                                                                                                                                    const modeTabs = document.querySelectorAll('.mode-tab');
-                                                                                                                                                                                                    const modeDescription = document.getElementById('mode-description');
-                                                                                                                                                                                                    const operationsPanel = document.getElementById('operations-panel');
-                                                                                                                                                                                                    const operationsList = document.getElementById('operations-list');
-                                                                                                                                                                                                    const applyBtn = document.getElementById('apply-btn');
-                                                                                                                                                                                                    const rejectBtn = document.getElementById('reject-btn');
-                                                                                                                                                                                                    const newChatBtn = document.getElementById('new-chat-btn');
-                                                                                                                                                                                                    const historyBtn = document.getElementById('history-btn');
-                                                                                                                                                                                                    const historyPanel = document.getElementById('history-panel');
-                                                                                                                                                                                                    const historyList = document.getElementById('history-list');
-                                                                                                                                                                                                    const historyOverlay = document.getElementById('history-overlay');
-                                                                                                                                                                                                    const closeHistoryBtn = document.getElementById('close-history');
-                                                                                                                                                                                                    const planPanel = document.getElementById('plan-panel');
-                                                                                                                                                                                                    const planList = document.getElementById('plan-list');
-                                                                                                                                                                                                    const agentStatusBadge = document.getElementById('agent-status');
+            (function () {
+            // Prevent duplicate initialization
+            if (window._tokamakInitialized) {
+            return;
+            }
+            window._tokamakInitialized = true;
 
-                                                                                                                                                                                                    let currentStreamingMessage = null;
-                                                                                                                                                                                                    let streamingContent = '';
-                                                                                                                                                                                                    let typingInterval = null;
-                                                                                                                                                                                                    let attachedFiles = [];
-                                                                                                                                                                                                    let autocompleteFiles = [];
-                                                                                                                                                                                                    let autocompleteCommands = [];
-                                                                                                                                                                                                    let autocompleteType = 'file'; // 'file' or 'command'
-                                                                                                                                                                                                    let selectedAutocompleteIndex = 0;
-                                                                                                                                                                                                    let mentionStartIndex = -1;
-                                                                                                                                                                                                    let slashStartIndex = -1;
-                                                                                                                                                                                                    let currentMode = 'ask';
-                                                                                                                                                                                                    let attachedImages = []; // Array of base64 strings
+            const vscode = acquireVsCodeApi();
+            const chatContainer = document.getElementById('chat-container');
+            const messageInput = document.getElementById('message-input');
+            const sendBtn = document.getElementById('send-btn');
+            const stopBtn = document.getElementById('stop-btn');
+            const typingIndicator = document.getElementById('typing-indicator');
+            const modelSelect = document.getElementById('model-select');
+            const autocomplete = document.getElementById('autocomplete');
+            const attachedFilesContainer = document.getElementById('attached-files');
+            const modeTabs = document.querySelectorAll('.mode-tab');
+            const modeDescription = document.getElementById('mode-description');
+            const operationsPanel = document.getElementById('operations-panel');
+            const operationsList = document.getElementById('operations-list');
+            const applyBtn = document.getElementById('apply-btn');
+            const rejectBtn = document.getElementById('reject-btn');
+            const newChatBtn = document.getElementById('new-chat-btn');
+            const historyBtn = document.getElementById('history-btn');
+            const historyPanel = document.getElementById('history-panel');
+            const historyList = document.getElementById('history-list');
+            const historyOverlay = document.getElementById('history-overlay');
+            const closeHistoryBtn = document.getElementById('close-history');
+            const planPanel = document.getElementById('plan-panel');
+            const planList = document.getElementById('plan-list');
+            const agentStatusBadge = document.getElementById('agent-status');
 
-                                                                                                                                                                                                    function addImageTag(base64Data) {
-                                                                                                                                                                                                        const tag = document.createElement('div');
-                                                                                                                                                                                                        tag.className = 'image-tag';
-                                                                                                                                                                                                        tag.innerHTML = '<img src="' + base64Data + '"><span class="remove-img">×</span>';
+            let currentStreamingMessage = null;
+            let streamingContent = '';
+            let typingInterval = null;
+            let attachedFiles = [];
+            let autocompleteFiles = [];
+            let autocompleteCommands = [];
+            let autocompleteType = 'file'; // 'file' or 'command'
+            let selectedAutocompleteIndex = 0;
+            let mentionStartIndex = -1;
+            let slashStartIndex = -1;
+            let currentMode = 'ask';
+            let attachedImages = []; // Array of base64 strings
 
-                                                                                                                                                                                                        tag.querySelector('.remove-img').onclick = () => {
-                                                                                                                                                                                                            const index = attachedImages.indexOf(base64Data);
-                                                                                                                                                                                                            if (index > -1) {
-                                                                                                                                                                                                                attachedImages.splice(index, 1);
-                                                                                                                                                                                                            }
-                                                                                                                                                                                                            tag.remove();
-                                                                                                                                                                                                        };
+            function addImageTag(base64Data) {
+            const tag = document.createElement('div');
+            tag.className = 'image-tag';
+            tag.innerHTML = '<img src="' + base64Data + '"><span class="remove-img">×</span>';
 
-                                                                                                                                                                                                        attachedFilesContainer.appendChild(tag);
-                                                                                                                                                                                                        attachedImages.push(base64Data);
-                                                                                                                                                                                                    }
+            tag.querySelector('.remove-img').onclick = () => {
+            const index = attachedImages.indexOf(base64Data);
+            if (index > -1) {
+            attachedImages.splice(index, 1);
+            }
+            tag.remove();
+            };
 
-                                                                                                                                                                                                    const modeDescriptions = {
-                                                                                                                                                                                                        ask: 'Ask questions about your code',
-                                                                                                                                                                                                        plan: 'Plan your implementation without code changes',
-                                                                                                                                                                                                        agent: 'AI will create, edit, and delete files for you'
-                                                                                                                                                                                                    };
+            attachedFilesContainer.appendChild(tag);
+            attachedImages.push(base64Data);
+            }
 
-                                                                                                                                                                                                    const modePlaceholders = {
-                                                                                                                                                                                                        ask: 'Ask about your code... Type @ to attach files',
-                                                                                                                                                                                                        plan: 'Describe what you want to build...',
-                                                                                                                                                                                                        agent: 'Tell me what to implement...'
-                                                                                                                                                                                                    };
+            const modeDescriptions = {
+            ask: 'Ask questions about your code',
+            plan: 'Plan your implementation without code changes',
+            agent: 'AI will create, edit, and delete files for you'
+            };
 
-                                                                                                                                                                                                    vscode.postMessage({ command: 'ready' });
+            const modePlaceholders = {
+            ask: 'Ask about your code... Type @ to attach files',
+            plan: 'Describe what you want to build...',
+            agent: 'Tell me what to implement...'
+            };
 
-                                                                                                                                                                                                    function escapeHtml(text) {
-                                                                                                                                                                                                        const div = document.createElement('div');
-                                                                                                                                                                                                        div.textContent = text;
-                                                                                                                                                                                                        return div.innerHTML;
-                                                                                                                                                                                                    }
+            vscode.postMessage({ command: 'ready' });
 
-                                                                                                                                                                                                    function parseMarkdown(text) {
-                                                                                                                                                                                                        let result = escapeHtml(text);
-                                                                                                                                                                                                        // Hide file operation blocks in display
-                                                                                                                                                                                                        result = result.replace(/&lt;&lt;&lt;FILE_OPERATION&gt;&gt;&gt;[\\s\\S]*?&lt;&lt;&lt;END_OPERATION&gt;&gt;&gt;/g, '');
-                                                                                                                                                                                                        result = result.replace(/\`\`\`(\\w*)\\n([\\s\\S]*?)\`\`\`/g, (match, lang, code) => {
-                                                                                                                                                                                                            const escapedCode = code.trim();
-                                                                                                                                                                                                            const langLabel = lang || 'code';
-                                                                                                                                                                                                            const isShell = ['bash', 'shell', 'sh', 'zsh', 'powershell', 'cmd'].includes(lang.toLowerCase());
-                                                                                                                                                                                                            const runBtn = isShell ?\`<button class="run-btn" onclick="runCommand(this)">▶ Run</button>\` : '';
-                return \`<div class="code-header"><span>\${langLabel}</span><div><button class="insert-btn" onclick="insertCode(this)">Insert</button>\${runBtn}</div></div><pre><code class="language-\${lang}">\${escapedCode}</code></pre>\`;
+            function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+            }
+
+            function parseMarkdown(text) {
+            let result = escapeHtml(text);
+            // Hide file operation blocks in display
+            result = result.replace(/&lt;&lt;&lt;FILE_OPERATION&gt;&gt;&gt;[\\s\\S]*?&lt;&lt;&lt;END_OPERATION&gt;&gt;&gt;/g, '');
+            result = result.replace(/\`\`\`(\\w*)\\n([\\s\\S]*?)\`\`\`/g, (match, lang, code) => {
+            const escapedCode = code.trim();
+            const langLabel = lang || 'code';
+            const isShell = ['bash', 'shell', 'sh', 'zsh', 'powershell', 'cmd', 'python', 'python3'].includes(lang.toLowerCase());
+            const runBtn = isShell ?\`<button class="run-btn" onclick="runCommand(this)">▶ Run</button>\` : '';
+            return \`<div class="code-header"><span>\${langLabel}</span><div><button class="insert-btn" onclick="insertCode(this)">Insert</button>\${runBtn}</div></div><pre><code class="language-\${lang}">\${escapedCode}</code></pre>\`;
             });
             result = result.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
             result = result.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
             result = result.replace(/\\n/g, '<br>');
             return result;
-        }
+            }
 
-        function addMessage(role, content) {
+            function addMessage(role, content) {
             const messageDiv = document.createElement('div');
             messageDiv.className = 'message ' + role;
 
@@ -2139,43 +2196,43 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
 
             const contentDiv = document.createElement('div');
             contentDiv.className = 'message-content';
-            
+
             let textContent = '';
             let images = [];
-            
+
             if (typeof content === 'string') {
-                textContent = content;
+            textContent = content;
             } else if (Array.isArray(content)) {
-                content.forEach(item => {
-                    if (item.type === 'text') {
-                        textContent += item.text;
-                    } else if (item.type === 'image_url') {
-                        images.push(item.image_url.url);
-                    }
-                });
+            content.forEach(item => {
+            if (item.type === 'text') {
+            textContent += item.text;
+            } else if (item.type === 'image_url') {
+            images.push(item.image_url.url);
             }
-            
+            });
+            }
+
             contentDiv.innerHTML = parseMarkdown(textContent);
-            
+
             if (images.length > 0) {
-                const imagesDiv = document.createElement('div');
-                imagesDiv.className = 'message-images';
-                imagesDiv.style.display = 'flex';
-                imagesDiv.style.flexWrap = 'wrap';
-                imagesDiv.style.gap = '8px';
-                imagesDiv.style.marginTop = '8px';
-                
-                images.forEach(src => {
-                    const img = document.createElement('img');
-                    img.src = src;
-                    img.style.maxWidth = '100%';
-                    img.style.maxHeight = '200px';
-                    img.style.borderRadius = '4px';
-                    img.style.cursor = 'pointer';
-                    img.onclick = () => window.open(src);
-                    imagesDiv.appendChild(img);
-                });
-                contentDiv.appendChild(imagesDiv);
+            const imagesDiv = document.createElement('div');
+            imagesDiv.className = 'message-images';
+            imagesDiv.style.display = 'flex';
+            imagesDiv.style.flexWrap = 'wrap';
+            imagesDiv.style.gap = '8px';
+            imagesDiv.style.marginTop = '8px';
+
+            images.forEach(src => {
+            const img = document.createElement('img');
+            img.src = src;
+            img.style.maxWidth = '100%';
+            img.style.maxHeight = '200px';
+            img.style.borderRadius = '4px';
+            img.style.cursor = 'pointer';
+            img.onclick = () => window.open(src);
+            imagesDiv.appendChild(img);
+            });
+            contentDiv.appendChild(imagesDiv);
             }
 
             messageDiv.appendChild(roleDiv);
@@ -2184,61 +2241,61 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             chatContainer.scrollTop = chatContainer.scrollHeight;
 
             return messageDiv;
-        }
+            }
 
-        function startStreaming() {
+            function startStreaming() {
             // Ensure no lingering streaming state
             streamingContent = '';
-            
+
             // Create new message container
             currentStreamingMessage = document.createElement('div');
             currentStreamingMessage.className = 'message assistant';
-            
+
             const roleDiv = document.createElement('div');
             roleDiv.className = 'message-role';
             roleDiv.textContent = 'Tokamak AI';
-            
+
             const contentDiv = document.createElement('div');
             contentDiv.className = 'message-content';
-            
+
             currentStreamingMessage.appendChild(roleDiv);
             currentStreamingMessage.appendChild(contentDiv);
             chatContainer.appendChild(currentStreamingMessage);
-            
+
             typingIndicator.classList.add('visible');
-            
+
             // Start animation
             let dots = 0;
             typingIndicator.textContent = 'AI is thinking';
             if (typingInterval) clearInterval(typingInterval);
             typingInterval = setInterval(() => {
-                dots = (dots + 1) % 4;
-                typingIndicator.textContent = 'AI is thinking' + '.'.repeat(dots);
+            dots = (dots + 1) % 4;
+            typingIndicator.textContent = 'AI is thinking' + '.'.repeat(dots);
             }, 500);
 
             sendBtn.style.display = 'none';
             stopBtn.classList.add('visible');
             chatContainer.scrollTop = chatContainer.scrollHeight;
-        }
+            }
 
-        function handleStreamChunk(chunk) {
+            function handleStreamChunk(chunk) {
             if (!currentStreamingMessage) return;
-            
+
             streamingContent += chunk;
             const contentDiv = currentStreamingMessage.querySelector('.message-content');
-            
+
             // Re-render markdown only when necessary (e.g., block finished) or use a simpler update for speed
             // For now, full re-render is safer for markdown but let's ensure we are targeting the correct element
             contentDiv.innerHTML = parseMarkdown(streamingContent);
-            
+
             // Auto-scroll
             chatContainer.scrollTop = chatContainer.scrollHeight;
-        }
+            }
 
-        function endStreaming() {
+            function endStreaming() {
             if (typingInterval) {
-                clearInterval(typingInterval);
-                typingInterval = null;
+            clearInterval(typingInterval);
+            typingInterval = null;
             }
             typingIndicator.textContent = 'AI is thinking...';
 
@@ -2247,21 +2304,21 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             sendBtn.disabled = false;
             sendBtn.style.display = 'block';
             stopBtn.classList.remove('visible');
-        }
+            }
 
-        function insertCode(btn) {
+            function insertCode(btn) {
             const pre = btn.closest('.code-header').nextElementSibling;
             const code = pre.querySelector('code').textContent;
             vscode.postMessage({ command: 'insertCode', code: code });
-        }
+            }
 
-        function runCommand(btn) {
+            function runCommand(btn) {
             const pre = btn.closest('.code-header').nextElementSibling;
             const command = pre.querySelector('code').textContent;
-            vscode.postMessage({ command: 'runCommand', command: command });
-        }
+            vscode.postMessage({ command: 'runCommand', commandText: command });
+            }
 
-        function addFileTag(filePath, isDir = false) {
+            function addFileTag(filePath, isDir = false) {
             if (attachedFiles.some(f => f.path === filePath)) return;
 
             attachedFiles.push({ path: filePath, isDir });
@@ -2270,110 +2327,110 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             const tag = document.createElement('span');
             tag.className = 'file-tag';
             tag.innerHTML = \`
-                <span class="icon">\${isDir ? '📁' : '📄'}</span>
-                <span class="file-name" data-path="\${filePath}">\${fileName}</span>
-                <span class="remove-btn" data-path="\${filePath}">×</span>
+            <span class="icon">\${isDir ? '📁' : '📄'}</span>
+            <span class="file-name" data-path="\${filePath}">\${fileName}</span>
+            <span class="remove-btn" data-path="\${filePath}">×</span>
             \`;
 
             tag.querySelector('.file-name').addEventListener('click', () => {
-                vscode.postMessage({ command: 'openFile', path: filePath });
+            vscode.postMessage({ command: 'openFile', path: filePath });
             });
 
             tag.querySelector('.remove-btn').addEventListener('click', () => {
-                attachedFiles = attachedFiles.filter(f => f.path !== filePath);
-                tag.remove();
+            attachedFiles = attachedFiles.filter(f => f.path !== filePath);
+            tag.remove();
             });
 
             attachedFilesContainer.appendChild(tag);
-        }
+            }
 
-        function showAutocomplete(files) {
+            function showAutocomplete(files) {
             autocompleteFiles = files;
             autocompleteType = 'file';
             selectedAutocompleteIndex = 0;
 
             if (files.length === 0) {
-                autocomplete.classList.remove('visible');
-                return;
+            autocomplete.classList.remove('visible');
+            return;
             }
 
             autocomplete.innerHTML = files.map((file, index) => \`
-                <div class="autocomplete-item \${index === 0 ? 'selected' : ''}" data-index="\${index}" data-path="\${file.path}" data-isdir="\${file.isDir}">
-                    <span class="icon">\${file.isDir ? '📁' : '📄'}</span>
-                    <span class="name">\${file.name}</span>
-                    <span class="path">\${file.path}</span>
-                </div>
+            <div class="autocomplete-item \${index === 0 ? 'selected' : ''}" data-index="\${index}" data-path="\${file.path}" data-isdir="\${file.isDir}">
+            <span class="icon">\${file.isDir ? '📁' : '📄'}</span>
+            <span class="name">\${file.name}</span>
+            <span class="path">\${file.path}</span>
+            </div>
             \`).join('');
 
             autocomplete.querySelectorAll('.autocomplete-item').forEach(item => {
-                item.addEventListener('click', () => {
-                    selectAutocompleteItem(parseInt(item.dataset.index));
-                });
+            item.addEventListener('click', () => {
+            selectAutocompleteItem(parseInt(item.dataset.index));
+            });
             });
 
             autocomplete.classList.add('visible');
-        }
+            }
 
-        function showSlashAutocomplete(commands) {
+            function showSlashAutocomplete(commands) {
             autocompleteCommands = commands;
             autocompleteType = 'command';
             selectedAutocompleteIndex = 0;
 
             if (commands.length === 0) {
-                autocomplete.classList.remove('visible');
-                return;
+            autocomplete.classList.remove('visible');
+            return;
             }
 
             autocomplete.innerHTML = commands.map((cmd, index) => \`
-                <div class="autocomplete-item slash-cmd \${index === 0 ? 'selected' : ''}" data-index="\${index}" data-name="\${cmd.name}">
-                    <span class="icon">⚡</span>
-                    <span class="name">\${cmd.name}</span>
-                    <span class="desc">\${cmd.description}</span>
-                </div>
+            <div class="autocomplete-item slash-cmd \${index === 0 ? 'selected' : ''}" data-index="\${index}" data-name="\${cmd.name}">
+            <span class="icon">⚡</span>
+            <span class="name">\${cmd.name}</span>
+            <span class="desc">\${cmd.description}</span>
+            </div>
             \`).join('');
 
             autocomplete.querySelectorAll('.autocomplete-item').forEach(item => {
-                item.addEventListener('click', () => {
-                    selectAutocompleteItem(parseInt(item.dataset.index));
-                });
+            item.addEventListener('click', () => {
+            selectAutocompleteItem(parseInt(item.dataset.index));
+            });
             });
 
             autocomplete.classList.add('visible');
-        }
+            }
 
-        function hideAutocomplete() {
+            function hideAutocomplete() {
             autocomplete.classList.remove('visible');
             mentionStartIndex = -1;
             slashStartIndex = -1;
-        }
+            }
 
-        function selectAutocompleteItem(index) {
+            function selectAutocompleteItem(index) {
             if (autocompleteType === 'file') {
-                const file = autocompleteFiles[index];
-                if (!file) return;
+            const file = autocompleteFiles[index];
+            if (!file) return;
 
-                const value = messageInput.value;
-                const beforeMention = value.substring(0, mentionStartIndex);
-                const afterCursor = value.substring(messageInput.selectionStart);
-                messageInput.value = beforeMention + afterCursor;
+            const value = messageInput.value;
+            const beforeMention = value.substring(0, mentionStartIndex);
+            const afterCursor = value.substring(messageInput.selectionStart);
+            messageInput.value = beforeMention + afterCursor;
 
-                addFileTag(file.path, file.isDir);
+            addFileTag(file.path, file.isDir);
             } else if (autocompleteType === 'command') {
-                const cmd = autocompleteCommands[index];
-                if (!cmd) return;
+            const cmd = autocompleteCommands[index];
+            if (!cmd) return;
 
-                const value = messageInput.value;
-                const beforeSlash = value.substring(0, slashStartIndex);
-                const afterCursor = value.substring(messageInput.selectionStart);
-                messageInput.value = beforeSlash + cmd.name + ' ' + afterCursor.trimStart();
-                messageInput.selectionStart = messageInput.selectionEnd = beforeSlash.length + cmd.name.length + 1;
+            const value = messageInput.value;
+            const beforeSlash = value.substring(0, slashStartIndex);
+            const afterCursor = value.substring(messageInput.selectionStart);
+            messageInput.value = beforeSlash + cmd.name + ' ' + afterCursor.trimStart();
+            messageInput.selectionStart = messageInput.selectionEnd = beforeSlash.length + cmd.name.length + 1;
             }
 
             hideAutocomplete();
             messageInput.focus();
-        }
+            }
 
-        function updateAutocompleteSelection(delta) {
+            function updateAutocompleteSelection(delta) {
             const items = autocomplete.querySelectorAll('.autocomplete-item');
             if (items.length === 0) return;
 
@@ -2381,12 +2438,12 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             selectedAutocompleteIndex = (selectedAutocompleteIndex + delta + items.length) % items.length;
             items[selectedAutocompleteIndex].classList.add('selected');
             items[selectedAutocompleteIndex].scrollIntoView({ block: 'nearest' });
-        }
+            }
 
-        let isSending = false;
-        function sendMessage() {
+            let isSending = false;
+            function sendMessage() {
             if (isSending) return;
-            
+
             const text = messageInput.value.trim();
             if (!text && attachedFiles.length === 0 && attachedImages.length === 0) return;
 
@@ -2394,10 +2451,10 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             sendBtn.disabled = true;
 
             vscode.postMessage({
-                command: 'sendMessage',
-                text: text,
-                attachedFiles: attachedFiles.map(f => f.path),
-                attachedImages: attachedImages
+            command: 'sendMessage',
+            text: text,
+            attachedFiles: attachedFiles.map(f => f.path),
+            attachedImages: attachedImages
             });
 
             messageInput.value = '';
@@ -2409,162 +2466,162 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
 
             // Reset flag after a short delay
             setTimeout(() => { 
-                isSending = false;
-                sendBtn.disabled = false;
+            isSending = false;
+            sendBtn.disabled = false;
             }, 100);
-        }
+            }
 
-        function updateModels(models, selected) {
+            function updateModels(models, selected) {
             modelSelect.innerHTML = '';
             models.forEach(model => {
-                const option = document.createElement('option');
-                option.value = model;
-                option.textContent = model;
-                if (model === selected) {
-                    option.selected = true;
-                }
-                modelSelect.appendChild(option);
+            const option = document.createElement('option');
+            option.value = model;
+            option.textContent = model;
+            if (model === selected) {
+            option.selected = true;
+            }
+            modelSelect.appendChild(option);
             });
-        }
+            }
 
-        function showOperations(operations) {
+            function showOperations(operations) {
             operationsList.innerHTML = operations.map((op, index) => 
-                '<div class="operation-item">' +
-                '<span class="op-type ' + op.type + '">' + op.type.toUpperCase() + '</span>' +
-                '<span class="op-path">' + op.path + '</span>' +
-                '<button class="preview-btn" data-index="' + index + '">Preview</button>' +
-                '<button class="reject-item-btn" data-index="' + index + '" title="Reject this change">×</button>' +
-                '</div>'
+            '<div class="operation-item">' +
+            '<span class="op-type ' + op.type + '">' + op.type.toUpperCase() + '</span>' +
+            '<span class="op-path">' + op.path + '</span>' +
+            '<button class="preview-btn" data-index="' + index + '">Preview</button>' +
+            '<button class="reject-item-btn" data-index="' + index + '" title="Reject this change">×</button>' +
+            '</div>'
             ).join('');
 
             // Add preview button handlers
             operationsList.querySelectorAll('.preview-btn').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    const index = parseInt(btn.dataset.index);
-                    vscode.postMessage({ command: 'previewOperation', index: index });
-                });
+            btn.addEventListener('click', () => {
+            const index = parseInt(btn.dataset.index);
+            vscode.postMessage({ command: 'previewOperation', index: index });
+            });
             });
 
             // Add individual reject button handlers
             operationsList.querySelectorAll('.reject-item-btn').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    const index = parseInt(btn.dataset.index);
-                    vscode.postMessage({ command: 'rejectOperation', index: index });
-                });
+            btn.addEventListener('click', () => {
+            const index = parseInt(btn.dataset.index);
+            vscode.postMessage({ command: 'rejectOperation', index: index });
+            });
             });
 
             operationsPanel.classList.add('visible');
-        }
+            }
 
-        function hideOperations() {
+            function hideOperations() {
             operationsPanel.classList.remove('visible');
             operationsList.innerHTML = '';
-        }
+            }
 
-        // History Panel Handlers
-        historyBtn.addEventListener('click', () => {
+            // History Panel Handlers
+            historyBtn.addEventListener('click', () => {
             historyPanel.classList.add('visible');
             historyOverlay.classList.add('visible');
             vscode.postMessage({ command: 'getSessions' });
-        });
+            });
 
-        const closeHistory = () => {
+            const closeHistory = () => {
             historyPanel.classList.remove('visible');
             historyOverlay.classList.remove('visible');
-        };
+            };
 
-        closeHistoryBtn.addEventListener('click', closeHistory);
-        historyOverlay.addEventListener('click', closeHistory);
+            closeHistoryBtn.addEventListener('click', closeHistory);
+            historyOverlay.addEventListener('click', closeHistory);
 
-        function renderSessions(sessions, currentId) {
+            function renderSessions(sessions, currentId) {
             historyList.innerHTML = sessions.map(s => {
-                const date = new Date(s.timestamp).toLocaleString();
-                const activeClass = s.id === currentId ? 'active' : '';
-                const title = s.title || 'New Conversation';
-                return '<div class="session-item ' + activeClass + '" data-id="' + s.id + '">' +
-                       '<div class="session-title">' + title + '</div>' +
-                       '<div class="session-date">' + date + '</div>' +
-                       '<span class="delete-session" data-id="' + s.id + '">🗑️</span>' +
-                       '</div>';
+            const date = new Date(s.timestamp).toLocaleString();
+            const activeClass = s.id === currentId ? 'active' : '';
+            const title = s.title || 'New Conversation';
+            return '<div class="session-item ' + activeClass + '" data-id="' + s.id + '">' +
+            '<div class="session-title">' + title + '</div>' +
+            '<div class="session-date">' + date + '</div>' +
+            '<span class="delete-session" data-id="' + s.id + '">🗑️</span>' +
+            '</div>';
             }).join('');
 
             historyList.querySelectorAll('.session-item').forEach(item => {
-                item.addEventListener('click', (e) => {
-                    if (e.target.classList.contains('delete-session')) {
-                        vscode.postMessage({ command: 'deleteSession', sessionId: e.target.dataset.id });
-                    } else {
-                        vscode.postMessage({ command: 'loadSession', sessionId: item.dataset.id });
-                        closeHistory();
-                    }
-                });
+            item.addEventListener('click', (e) => {
+            if (e.target.classList.contains('delete-session')) {
+            vscode.postMessage({ command: 'deleteSession', sessionId: e.target.dataset.id });
+            } else {
+            vscode.postMessage({ command: 'loadSession', sessionId: item.dataset.id });
+            closeHistory();
+            }
             });
-        }
+            });
+            }
 
-        // Mode tabs
-        modeTabs.forEach(tab => {
+            // Mode tabs
+            modeTabs.forEach(tab => {
             tab.addEventListener('click', () => {
-                modeTabs.forEach(t => t.classList.remove('active'));
-                tab.classList.add('active');
-                currentMode = tab.dataset.mode;
-                modeDescription.textContent = modeDescriptions[currentMode];
-                messageInput.placeholder = modePlaceholders[currentMode];
-                vscode.postMessage({ command: 'selectMode', mode: currentMode });
+            modeTabs.forEach(t => t.classList.remove('active'));
+            tab.classList.add('active');
+            currentMode = tab.dataset.mode;
+            modeDescription.textContent = modeDescriptions[currentMode];
+            messageInput.placeholder = modePlaceholders[currentMode];
+            vscode.postMessage({ command: 'selectMode', mode: currentMode });
             });
-        });
+            });
 
-        modelSelect.addEventListener('change', () => {
+            modelSelect.addEventListener('change', () => {
             vscode.postMessage({ command: 'selectModel', model: modelSelect.value });
-        });
+            });
 
-        sendBtn.addEventListener('click', sendMessage);
+            sendBtn.addEventListener('click', sendMessage);
 
-        stopBtn.addEventListener('click', () => {
+            stopBtn.addEventListener('click', () => {
             vscode.postMessage({ command: 'stopGeneration' });
-        });
+            });
 
-        applyBtn.addEventListener('click', () => {
+            applyBtn.addEventListener('click', () => {
             vscode.postMessage({ command: 'applyOperations' });
-        });
+            });
 
-        rejectBtn.addEventListener('click', () => {
+            rejectBtn.addEventListener('click', () => {
             vscode.postMessage({ command: 'rejectOperations' });
-        });
+            });
 
-        newChatBtn.addEventListener('click', () => {
+            newChatBtn.addEventListener('click', () => {
             vscode.postMessage({ command: 'newChat' });
-        });
+            });
 
-        messageInput.addEventListener('keydown', (e) => {
+            messageInput.addEventListener('keydown', (e) => {
             if (autocomplete.classList.contains('visible')) {
-                if (e.key === 'ArrowDown') {
-                    e.preventDefault();
-                    updateAutocompleteSelection(1);
-                    return;
-                }
-                if (e.key === 'ArrowUp') {
-                    e.preventDefault();
-                    updateAutocompleteSelection(-1);
-                    return;
-                }
-                if (e.key === 'Enter' || e.key === 'Tab') {
-                    e.preventDefault();
-                    selectAutocompleteItem(selectedAutocompleteIndex);
-                    return;
-                }
-                if (e.key === 'Escape') {
-                    e.preventDefault();
-                    hideAutocomplete();
-                    return;
-                }
+            if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            updateAutocompleteSelection(1);
+            return;
+            }
+            if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            updateAutocompleteSelection(-1);
+            return;
+            }
+            if (e.key === 'Enter' || e.key === 'Tab') {
+            e.preventDefault();
+            selectAutocompleteItem(selectedAutocompleteIndex);
+            return;
+            }
+            if (e.key === 'Escape') {
+            e.preventDefault();
+            hideAutocomplete();
+            return;
+            }
             }
 
             if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage();
+            e.preventDefault();
+            sendMessage();
             }
-        });
+            });
 
-        messageInput.addEventListener('input', () => {
+            messageInput.addEventListener('input', () => {
             messageInput.style.height = 'auto';
             messageInput.style.height = Math.min(messageInput.scrollHeight, 150) + 'px';
 
@@ -2574,211 +2631,212 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
 
             // Check for slash command at the start of input
             if (value.startsWith('/')) {
-                const query = textBeforeCursor.substring(1);
-                if (!/\\s/.test(query) || query.length === 0) {
-                    slashStartIndex = 0;
-                    vscode.postMessage({ command: 'searchSlashCommands', query: '/' + query });
-                    return;
-                }
+            const query = textBeforeCursor.substring(1);
+            if (!/\\s/.test(query) || query.length === 0) {
+            slashStartIndex = 0;
+            vscode.postMessage({ command: 'searchSlashCommands', query: '/' + query });
+            return;
+            }
             }
 
             // Check for @ mention
             const atIndex = textBeforeCursor.lastIndexOf('@');
             if (atIndex !== -1 && (atIndex === 0 || /\\s/.test(value[atIndex - 1]))) {
-                const query = textBeforeCursor.substring(atIndex + 1);
-                if (!/\\s/.test(query)) {
-                    mentionStartIndex = atIndex;
-                    vscode.postMessage({ command: 'searchFiles', query: query });
-                    return;
-                }
+            const query = textBeforeCursor.substring(atIndex + 1);
+            if (!/\\s/.test(query)) {
+            mentionStartIndex = atIndex;
+            vscode.postMessage({ command: 'searchFiles', query: query });
+            return;
+            }
             }
 
             hideAutocomplete();
-        });
+            });
 
-        messageInput.addEventListener('paste', (e) => {
+            messageInput.addEventListener('paste', (e) => {
             const items = e.clipboardData.items;
             for (let i = 0; i < items.length; i++) {
-                if (items[i].type.indexOf('image') !== -1) {
-                    const blob = items[i].getAsFile();
-                    const reader = new FileReader();
-                    reader.onload = (event) => {
-                        addImageTag(event.target.result);
-                    };
-                    reader.readAsDataURL(blob);
-                }
+            if (items[i].type.indexOf('image') !== -1) {
+            const blob = items[i].getAsFile();
+            const reader = new FileReader();
+            reader.onload = (event) => {
+            addImageTag(event.target.result);
+            };
+            reader.readAsDataURL(blob);
             }
-        });
+            }
+            });
 
-        window.addEventListener('message', (event) => {
+            window.addEventListener('message', (event) => {
             const message = event.data;
             switch (message.command) {
-                case 'addMessage':
-                    addMessage(message.role, message.content);
-                    break;
-                case 'startStreaming':
-                    startStreaming();
-                    break;
-                case 'streamChunk':
-                    handleStreamChunk(message.content);
-                    break;
-                case 'endStreaming':
-                    endStreaming();
-                    break;
-                case 'clearMessages':
-                    chatContainer.innerHTML = '';
-                    hideOperations();
-                    break;
-                case 'updateModels':
-                    updateModels(message.models, message.selected);
-                    break;
-                case 'fileSearchResults':
-                    showAutocomplete(message.files);
-                    break;
-                case 'modeChanged':
-                    currentMode = message.mode;
-                    modeTabs.forEach(t => {
-                        t.classList.toggle('active', t.dataset.mode === currentMode);
-                    });
-                    modeDescription.textContent = modeDescriptions[currentMode];
-                    messageInput.placeholder = modePlaceholders[currentMode];
-                    break;
-                case 'showOperations':
-                    showOperations(message.operations);
-                    break;
-                case 'operationsCleared':
-                    hideOperations();
-                    break;
-                case 'fileDropped':
-                    addFileTag(message.path, message.isDir);
-                    break;
-                case 'receiveCode':
-                    // Add file as attachment and set code context in input
-                    if (message.filePath) {
-                        addFileTag(message.filePath);
-                    }
-                    const codeBlock = \`\\\`\\\`\\\`\${message.languageId}\\n\${message.code}\\n\\\`\\\`\\\`\`;
-                    messageInput.value = \`이 코드에 대해:\\n\${codeBlock}\\n\\n\`;
-                    messageInput.focus();
-                    messageInput.style.height = 'auto';
-                    messageInput.style.height = Math.min(messageInput.scrollHeight, 150) + 'px';
-                    break;
-                case 'slashCommandResults':
-                    showSlashAutocomplete(message.commands);
-                    break;
-                case 'sessionsList':
-                    renderSessions(message.sessions, message.currentSessionId);
-                    break;
-                case 'updatePlan':
-                    updatePlanUI(message.plan);
-                    break;
-                case 'agentStateChanged':
-                    updateAgentStatusUI(message.state);
-                    break;
-                case 'generationStopped':
-                    endStreaming();
-                    break;
+            case 'addMessage':
+            addMessage(message.role, message.content);
+            break;
+            case 'startStreaming':
+            startStreaming();
+            break;
+            case 'streamChunk':
+            handleStreamChunk(message.content);
+            break;
+            case 'endStreaming':
+            endStreaming();
+            break;
+            case 'clearMessages':
+            chatContainer.innerHTML = '';
+            hideOperations();
+            break;
+            case 'updateModels':
+            updateModels(message.models, message.selected);
+            break;
+            case 'fileSearchResults':
+            showAutocomplete(message.files);
+            break;
+            case 'modeChanged':
+            currentMode = message.mode;
+            modeTabs.forEach(t => {
+            t.classList.toggle('active', t.dataset.mode === currentMode);
+            });
+            modeDescription.textContent = modeDescriptions[currentMode];
+            messageInput.placeholder = modePlaceholders[currentMode];
+            break;
+            case 'showOperations':
+            showOperations(message.operations);
+            break;
+            case 'operationsCleared':
+            hideOperations();
+            break;
+            case 'fileDropped':
+            addFileTag(message.path, message.isDir);
+            break;
+            case 'receiveCode':
+            // Add file as attachment and set code context in input
+            if (message.filePath) {
+            addFileTag(message.filePath);
             }
-        });
+            const codeBlock = \`\\\`\\\`\\\`\${message.languageId}\\n\${message.code}\\n\\\`\\\`\\\`\`;
+            messageInput.value = \`이 코드에 대해:\\n\${codeBlock}\\n\\n\`;
+            messageInput.focus();
+            messageInput.style.height = 'auto';
+            messageInput.style.height = Math.min(messageInput.scrollHeight, 150) + 'px';
+            break;
+            case 'slashCommandResults':
+            showSlashAutocomplete(message.commands);
+            break;
+            case 'sessionsList':
+            renderSessions(message.sessions, message.currentSessionId);
+            break;
+            case 'updatePlan':
+            updatePlanUI(message.plan);
+            break;
+            case 'agentStateChanged':
+            updateAgentStatusUI(message.state);
+            break;
+            case 'generationStopped':
+            endStreaming();
+            break;
+            }
+            });
 
-        function updateAgentStatusUI(state) {
+            function updateAgentStatusUI(state) {
             agentStatusBadge.textContent = state;
             if (state !== 'Idle' && state !== 'Done' && state !== 'Error') {
-                planPanel.classList.add('visible');
+            planPanel.classList.add('visible');
             }
-        }
+            }
 
-        function updatePlanUI(plan) {
+            function updatePlanUI(plan) {
             if (!plan || plan.length === 0) {
-                planPanel.classList.remove('visible');
-                return;
+            planPanel.classList.remove('visible');
+            return;
             }
-            
+
             planPanel.classList.add('visible');
             planList.innerHTML = '';
-            
+
             plan.forEach(step => {
-                const item = document.createElement('div');
-                item.className = 'plan-item ' + step.status;
-                
-                let icon = '○';
-                if (step.status === 'running') icon = '⚡';
-                if (step.status === 'done') icon = '✓';
-                if (step.status === 'failed') icon = '✗';
-                
-                item.innerHTML = \`
-                    <span class="step-icon">\${icon}</span>
-                    <span class="step-desc">\${escapeHtml(step.description)}</span>
-                \`;
-                planList.appendChild(item);
+            const item = document.createElement('div');
+            item.className = 'plan-item ' + step.status;
+
+            let icon = '○';
+            if (step.status === 'running') icon = '⚡';
+            if (step.status === 'done') icon = '✓';
+            if (step.status === 'failed') icon = '✗';
+
+            item.innerHTML = \`
+            <span class="step-icon">\${icon}</span>
+            <span class="step-desc">\${escapeHtml(step.description)}</span>
+            \`;
+            planList.appendChild(item);
             });
-        }
+            }
 
-// Drag and drop handling
-const dropZone = document.getElementById('drop-zone');
+            // Drag and drop handling
+            const dropZone = document.getElementById('drop-zone');
 
-dropZone.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dropZone.classList.add('drag-over');
-});
+            dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.add('drag-over');
+            });
 
-dropZone.addEventListener('dragleave', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dropZone.classList.remove('drag-over');
-});
+            dropZone.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.remove('drag-over');
+            });
 
-dropZone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dropZone.classList.remove('drag-over');
+            dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.remove('drag-over');
 
-    // Try different data formats
-    const uriList = e.dataTransfer.getData('text/uri-list');
-    const text = e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text');
+            // Try different data formats
+            const uriList = e.dataTransfer.getData('text/uri-list');
+            const text = e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('text');
 
-    // Handle VS Code Explorer drops (uri-list format)
-    if (uriList) {
-        const uris = uriList.split(/[\\r\\n]+/).filter(u => u && !u.startsWith('#'));
-        uris.forEach(uri => {
+            // Handle VS Code Explorer drops (uri-list format)
+            if (uriList) {
+            const uris = uriList.split(/[\\r\\n]+/).filter(u => u && !u.startsWith('#'));
+            uris.forEach(uri => {
             vscode.postMessage({ command: 'resolveFilePath', uri: uri.trim() });
-        });
-    }
-    // Handle text/plain drops
-    else if (text) {
-        const lines = text.split(/[\\r\\n]+/);
-        lines.forEach(line => {
+            });
+            }
+            // Handle text/plain drops
+            else if (text) {
+            const lines = text.split(/[\\r\\n]+/);
+            lines.forEach(line => {
             line = line.trim();
             if (line) {
-                vscode.postMessage({ command: 'resolveFilePath', uri: line });
+            vscode.postMessage({ command: 'resolveFilePath', uri: line });
             }
-        });
-    }
+            });
+            }
 
-    // Handle dropped files from system
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-        Array.from(e.dataTransfer.files).forEach(file => {
+            // Handle dropped files from system
+            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            Array.from(e.dataTransfer.files).forEach(file => {
             if (file.path) {
-                vscode.postMessage({ command: 'resolveFilePath', uri: file.path });
+            vscode.postMessage({ command: 'resolveFilePath', uri: file.path });
             }
-        });
-    }
-});
+            });
+            }
+            });
 
-// Also allow dropping on the whole chat container
-document.body.addEventListener('dragover', (e) => {
-    e.preventDefault();
-});
+            // Also allow dropping on the whole chat container
+            document.body.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            });
 
-document.body.addEventListener('drop', (e) => {
-    e.preventDefault();
-});
+            document.body.addEventListener('drop', (e) => {
+            e.preventDefault();
+            });
 
-window.insertCode = insertCode;
-window.runCommand = runCommand;
-    }) ();
-</script>
+            window.insertCode = insertCode;
+            window.runCommand = runCommand;
+            }) ();
+
+        </script>
     </body>
     </html>`;
     }

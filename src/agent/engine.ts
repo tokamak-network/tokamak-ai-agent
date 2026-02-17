@@ -245,12 +245,66 @@ ${stepContext}
             }
             await this.transitionTo('Fixing');
         } else {
-            await this.transitionTo('Executing');
+            // 에러가 없으면 Reflecting 단계로 이동하여 AI가 결과 평가
+            await this.transitionTo('Reflecting');
         }
     }
 
     private async handleReflection(): Promise<void> {
-        await this.transitionTo('Executing');
+        const step = this.plan[this.currentStepIndex];
+        if (!step || !step.result) {
+            await this.transitionTo('Executing');
+            return;
+        }
+
+        // AI에게 실행 결과 평가 요청
+        const prompt = `
+다음 단계를 실행했습니다:
+**단계**: ${step.description}
+**실행 결과**: ${step.result}
+
+이 결과가 의도한 대로 잘 수행되었는지 평가해주세요.
+다음 중 하나로 답변해주세요:
+- "SUCCESS": 의도대로 잘 수행됨, 다음 단계로 진행 가능
+- "RETRY": 결과가 불완전하거나 에러가 있음, 재시도 필요
+- "REPLAN": 계획을 수정해야 함
+
+답변은 위 키워드 하나만 포함하고, 간단한 이유를 한 줄로 추가해주세요.
+예: SUCCESS - 파일이 정상적으로 생성되었습니다.
+`;
+
+        try {
+            let aiResponse = '';
+            const stream = streamChatCompletion([{ role: 'user', content: prompt }]);
+            for await (const chunk of stream) {
+                aiResponse += chunk;
+            }
+
+            const evaluation = aiResponse.trim().toUpperCase();
+
+            if (evaluation.includes('SUCCESS')) {
+                console.log('[AgentEngine] Reflection: SUCCESS - proceeding to next step');
+                await this.transitionTo('Executing');
+            } else if (evaluation.includes('RETRY')) {
+                console.log('[AgentEngine] Reflection: RETRY - attempting to fix');
+                step.status = 'failed';
+                this.notifyPlanChange();
+                await this.transitionTo('Fixing');
+            } else if (evaluation.includes('REPLAN')) {
+                console.log('[AgentEngine] Reflection: REPLAN - replanning required');
+                const replanContext = `Previous step result: ${step.result}\nAI Evaluation: ${aiResponse}`;
+                this.plan = await this.planner.replan(this.plan, replanContext, streamChatCompletion);
+                this.notifyPlanChange();
+                await this.transitionTo('Executing');
+            } else {
+                // 불명확한 응답은 일단 진행
+                console.warn('[AgentEngine] Reflection: Unclear response, proceeding anyway');
+                await this.transitionTo('Executing');
+            }
+        } catch (error) {
+            console.error('[AgentEngine] Reflection failed:', error);
+            await this.transitionTo('Executing');
+        }
     }
 
     private async handleFixing(): Promise<void> {

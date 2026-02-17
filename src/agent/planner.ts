@@ -96,8 +96,50 @@ export class Planner {
     /**
      * 실행 중 오류가 발생했거나 상황이 변했을 때 기존 플랜을 수정합니다.
      */
-    public replan(currentPlan: PlanStep[], newContext: string): PlanStep[] {
-        // TODO: AI와 협력하여 플랜 업데이트
-        return currentPlan;
+    public async replan(currentPlan: PlanStep[], newContext: string, streamFn: any): Promise<PlanStep[]> {
+        const planSummary = currentPlan.map((step, idx) =>
+            `${idx + 1}. [${step.status}] ${step.description}${step.result ? `\n   Result: ${step.result.substring(0, 200)}...` : ''}`
+        ).join('\n');
+
+        const prompt = `
+현재 실행 중인 계획이 다음과 같습니다:
+${planSummary}
+
+새로운 상황:
+${newContext}
+
+위 상황을 고려하여 계획을 수정해주세요.
+- 완료된(done) 단계는 유지
+- 실패한(failed) 단계는 수정 또는 제거
+- 필요하면 새로운 단계 추가
+- 각 단계는 마크다운 체크리스트 형식(- [ ] 설명)으로 작성
+
+수정된 계획:
+`;
+
+        let aiResponse = '';
+        const stream = streamFn([{ role: 'user', content: prompt }]);
+        for await (const chunk of stream) {
+            aiResponse += chunk;
+        }
+
+        // 새 계획 파싱
+        const newPlan = this.parsePlan(aiResponse);
+
+        // 완료된 단계는 유지
+        const completedSteps = currentPlan.filter(s => s.status === 'done');
+
+        // 새 계획에 완료된 단계 정보 병합
+        for (const completed of completedSteps) {
+            const matchingNew = newPlan.find(n =>
+                n.description.toLowerCase().includes(completed.description.toLowerCase().substring(0, 30))
+            );
+            if (matchingNew) {
+                matchingNew.status = 'done';
+                matchingNew.result = completed.result;
+            }
+        }
+
+        return newPlan.length > 0 ? newPlan : currentPlan;
     }
 }
