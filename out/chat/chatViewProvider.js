@@ -159,7 +159,8 @@ When the user asks questions, they may include context about their current file 
 - Be concise and helpful
 - If the user asks about "this code" or "this file", refer to the provided context`,
             };
-            for await (const chunk of (0, client_js_1.streamChatCompletion)([systemMessage, ...this.chatHistory])) {
+            const streamResult = (0, client_js_1.streamChatCompletion)([systemMessage, ...this.chatHistory]);
+            for await (const chunk of streamResult.content) {
                 fullResponse += chunk;
                 this.postMessage({ command: 'streamChunk', content: chunk });
             }

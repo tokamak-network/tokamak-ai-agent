@@ -1116,15 +1116,30 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
                 loopCount++;
                 let fullResponse = '';
 
-                for await (const chunk of streamChatCompletion(
+                const streamResult = streamChatCompletion(
                     [systemMessage, ...this.chatHistory],
                     signal
-                )) {
+                );
+
+                for await (const chunk of streamResult.content) {
                     if (signal.aborted) {
                         break;
                     }
                     fullResponse += chunk;
                     this.panel.webview.postMessage({ command: 'streamChunk', content: chunk });
+                }
+
+                // Get token usage after streaming completes
+                const usage = await streamResult.usage;
+                if (usage) {
+                    this.panel.webview.postMessage({
+                        command: 'updateTokenUsage',
+                        usage: {
+                            prompt: usage.promptTokens,
+                            completion: usage.completionTokens,
+                            total: usage.totalTokens,
+                        },
+                    });
                 }
 
                 if (signal.aborted) break;
@@ -1597,6 +1612,28 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
         }
         .run-btn:hover {
             opacity: 0.9;
+        }
+        #token-usage-bar {
+            padding: 6px 15px;
+            background-color: var(--vscode-editorWidget-background);
+            border-top: 1px solid var(--vscode-widget-border);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.85em;
+            color: var(--vscode-descriptionForeground);
+        }
+        .token-label {
+            font-weight: 600;
+            color: var(--vscode-foreground);
+        }
+        #token-display {
+            font-weight: bold;
+            color: var(--vscode-charts-blue);
+        }
+        .token-detail {
+            opacity: 0.7;
+            font-size: 0.9em;
         }
         #input-container {
             padding: 15px;
@@ -2107,6 +2144,11 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             <button id="reject-btn">✗ Reject</button>
         </div>
     </div>
+    <div id="token-usage-bar">
+        <span class="token-label">Tokens:</span>
+        <span id="token-display">0</span>
+        <span class="token-detail" id="token-detail">(Prompt: 0 | Completion: 0)</span>
+    </div>
     <div id="input-container">
         <div id="autocomplete"></div>
         <div id="drop-zone" class="drop-zone">
@@ -2154,6 +2196,8 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             const planPanel = document.getElementById('plan-panel');
             const planList = document.getElementById('plan-list');
             const agentStatusBadge = document.getElementById('agent-status');
+            const tokenDisplay = document.getElementById('token-display');
+            const tokenDetail = document.getElementById('token-detail');
 
             let currentStreamingMessage = null;
             let streamingContent = '';
@@ -2166,6 +2210,9 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             let mentionStartIndex = -1;
             let slashStartIndex = -1;
             let currentMode = 'ask';
+            let sessionTotalTokens = 0;
+            let sessionPromptTokens = 0;
+            let sessionCompletionTokens = 0;
             let attachedImages = []; // Array of base64 strings
 
             function addImageTag(base64Data) {
@@ -2721,6 +2768,19 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             case 'clearMessages':
             chatContainer.innerHTML = '';
             hideOperations();
+            // Reset token counters
+            sessionTotalTokens = 0;
+            sessionPromptTokens = 0;
+            sessionCompletionTokens = 0;
+            tokenDisplay.textContent = '0';
+            tokenDetail.textContent = '(Prompt: 0 | Completion: 0)';
+            break;
+            case 'updateTokenUsage':
+            sessionPromptTokens += message.usage.prompt;
+            sessionCompletionTokens += message.usage.completion;
+            sessionTotalTokens += message.usage.total;
+            tokenDisplay.textContent = sessionTotalTokens.toLocaleString();
+            tokenDetail.textContent = \`(Prompt: \${sessionPromptTokens.toLocaleString()} | Completion: \${sessionCompletionTokens.toLocaleString()})\`;
             break;
             case 'updateModels':
             updateModels(message.models, message.selected);

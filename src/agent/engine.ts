@@ -121,8 +121,8 @@ ${globalContext}
 `;
 
             let aiResponse = '';
-            const stream = streamChatCompletion([{ role: 'user', content: prompt }]);
-            for await (const chunk of stream) {
+            const streamResult = streamChatCompletion([{ role: 'user', content: prompt }]);
+            for await (const chunk of streamResult.content) {
                 aiResponse += chunk;
             }
 
@@ -179,8 +179,8 @@ ${stepContext}
 - 답변에는 마크다운 없이 오직 JSON만 포함하거나, \`\`\`json 블록으로 감싸주세요.
 `;
                 let aiResponse = '';
-                const stream = streamChatCompletion([{ role: 'user', content: prompt }]);
-                for await (const chunk of stream) {
+                const streamResult = streamChatCompletion([{ role: 'user', content: prompt }]);
+                for await (const chunk of streamResult.content) {
                     aiResponse += chunk;
                 }
                 // JSON 부분만 추출
@@ -275,8 +275,8 @@ ${stepContext}
 
         try {
             let aiResponse = '';
-            const stream = streamChatCompletion([{ role: 'user', content: prompt }]);
-            for await (const chunk of stream) {
+            const streamResult = streamChatCompletion([{ role: 'user', content: prompt }]);
+            for await (const chunk of streamResult.content) {
                 aiResponse += chunk;
             }
 
@@ -333,8 +333,8 @@ ${errorContext}
 
         try {
             let aiResponse = '';
-            const stream = streamChatCompletion([{ role: 'user', content: prompt }]);
-            for await (const chunk of stream) {
+            const streamResult = streamChatCompletion([{ role: 'user', content: prompt }]);
+            for await (const chunk of streamResult.content) {
                 aiResponse += chunk;
             }
 

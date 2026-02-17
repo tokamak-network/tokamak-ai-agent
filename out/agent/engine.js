@@ -109,8 +109,8 @@ ${globalContext}
 3. **의존성**: 순서가 중요하다면 [depends: step-id]를 포함하세요.
 `;
             let aiResponse = '';
-            const stream = (0, client_js_1.streamChatCompletion)([{ role: 'user', content: prompt }]);
-            for await (const chunk of stream) {
+            const streamResult = (0, client_js_1.streamChatCompletion)([{ role: 'user', content: prompt }]);
+            for await (const chunk of streamResult.content) {
                 aiResponse += chunk;
             }
             this.plan = this.planner.parsePlan(aiResponse);
@@ -164,8 +164,8 @@ ${stepContext}
 - 답변에는 마크다운 없이 오직 JSON만 포함하거나, \`\`\`json 블록으로 감싸주세요.
 `;
                 let aiResponse = '';
-                const stream = (0, client_js_1.streamChatCompletion)([{ role: 'user', content: prompt }]);
-                for await (const chunk of stream) {
+                const streamResult = (0, client_js_1.streamChatCompletion)([{ role: 'user', content: prompt }]);
+                for await (const chunk of streamResult.content) {
                     aiResponse += chunk;
                 }
                 // JSON 부분만 추출
@@ -257,8 +257,8 @@ ${stepContext}
 `;
         try {
             let aiResponse = '';
-            const stream = (0, client_js_1.streamChatCompletion)([{ role: 'user', content: prompt }]);
-            for await (const chunk of stream) {
+            const streamResult = (0, client_js_1.streamChatCompletion)([{ role: 'user', content: prompt }]);
+            for await (const chunk of streamResult.content) {
                 aiResponse += chunk;
             }
             const evaluation = aiResponse.trim().toUpperCase();
@@ -313,8 +313,8 @@ ${errorContext}
 `;
         try {
             let aiResponse = '';
-            const stream = (0, client_js_1.streamChatCompletion)([{ role: 'user', content: prompt }]);
-            for await (const chunk of stream) {
+            const streamResult = (0, client_js_1.streamChatCompletion)([{ role: 'user', content: prompt }]);
+            for await (const chunk of streamResult.content) {
                 aiResponse += chunk;
             }
             const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);

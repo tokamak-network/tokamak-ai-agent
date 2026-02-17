@@ -7,7 +7,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private webviewView?: vscode.WebviewView;
     private chatHistory: ChatMessage[] = [];
 
-    constructor(private readonly extensionUri: vscode.Uri) {}
+    constructor(private readonly extensionUri: vscode.Uri) { }
 
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -145,7 +145,8 @@ When the user asks questions, they may include context about their current file 
 - If the user asks about "this code" or "this file", refer to the provided context`,
             };
 
-            for await (const chunk of streamChatCompletion([systemMessage, ...this.chatHistory])) {
+            const streamResult = streamChatCompletion([systemMessage, ...this.chatHistory]);
+            for await (const chunk of streamResult.content) {
                 fullResponse += chunk;
                 this.postMessage({ command: 'streamChunk', content: chunk });
             }

@@ -17,8 +17,8 @@ ${content.slice(0, 4000)} // 상위 일부만 사용하여 요약 요청 (토큰
 
         try {
             let summary = '';
-            const stream = streamChatCompletion([{ role: 'user', content: prompt }]);
-            for await (const chunk of stream) {
+            const streamResult = streamChatCompletion([{ role: 'user', content: prompt }]);
+            for await (const chunk of streamResult.content) {
                 summary += chunk;
             }
             return summary.trim();

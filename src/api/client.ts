@@ -39,6 +39,17 @@ export interface ChatMessage {
     content: string | any[];
 }
 
+export interface TokenUsage {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+}
+
+export interface StreamResult {
+    content: AsyncGenerator<string, void, unknown>;
+    usage: Promise<TokenUsage | null>;
+}
+
 export async function chatCompletion(messages: ChatMessage[]): Promise<string> {
     const client = getClient();
     const settings = getSettings();
@@ -51,36 +62,66 @@ export async function chatCompletion(messages: ChatMessage[]): Promise<string> {
     return response.choices[0]?.message?.content || '';
 }
 
-export async function* streamChatCompletion(
+export function streamChatCompletion(
     messages: ChatMessage[],
     abortSignal?: AbortSignal
-): AsyncGenerator<string, void, unknown> {
+): StreamResult {
     const client = getClient();
     const settings = getSettings();
 
-    const stream = await client.chat.completions.create({
-        model: settings.selectedModel,
-        messages: messages,
-        stream: true,
-    }, {
-        signal: abortSignal,
+    let usageResolver: ((value: TokenUsage | null) => void) | null = null;
+    const usagePromise = new Promise<TokenUsage | null>((resolve) => {
+        usageResolver = resolve;
     });
 
-    let lastChunk = '';
-    for await (const chunk of stream) {
-        if (abortSignal?.aborted) {
-            break;
-        }
-        const content = chunk.choices[0]?.delta?.content;
-        if (content) {
-            // Skip duplicate consecutive chunks (fixes double output issue)
-            if (content === lastChunk) {
-                continue;
+    const contentGenerator = async function* () {
+        const stream = await client.chat.completions.create({
+            model: settings.selectedModel,
+            messages: messages,
+            stream: true,
+            stream_options: { include_usage: true }, // Request usage info in stream
+        }, {
+            signal: abortSignal,
+        });
+
+        let lastChunk = '';
+        let usage: TokenUsage | null = null;
+
+        for await (const chunk of stream) {
+            if (abortSignal?.aborted) {
+                break;
             }
-            lastChunk = content;
-            yield content;
+
+            // Extract usage info if available (usually in the last chunk)
+            if (chunk.usage) {
+                usage = {
+                    promptTokens: chunk.usage.prompt_tokens || 0,
+                    completionTokens: chunk.usage.completion_tokens || 0,
+                    totalTokens: chunk.usage.total_tokens || 0,
+                };
+            }
+
+            const content = chunk.choices[0]?.delta?.content;
+            if (content) {
+                // Skip duplicate consecutive chunks (fixes double output issue)
+                if (content === lastChunk) {
+                    continue;
+                }
+                lastChunk = content;
+                yield content;
+            }
         }
-    }
+
+        // Resolve usage promise when stream ends
+        if (usageResolver) {
+            usageResolver(usage);
+        }
+    };
+
+    return {
+        content: contentGenerator(),
+        usage: usagePromise,
+    };
 }
 
 export async function codeCompletion(prefix: string, suffix: string, language: string): Promise<string> {

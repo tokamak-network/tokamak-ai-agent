@@ -92,20 +92,48 @@
 
 ---
 
-### 2.2 Diff 미리보기 (편집 전/후 비교)
+### ✅ 2.2 Diff 미리보기 (편집 전/후 비교)
 
-**현재 문제**: 파일 오퍼레이션 Apply 시 변경 전/후 비교가 불가능
+**✅ 구현 완료** (2026-02-17)
 
-**구현 계획**:
-- `vscode.commands.executeCommand('vscode.diff', originalUri, modifiedUri)` 활용
-- Operations Panel에서 각 오퍼레이션의 "Preview Diff" 버튼 추가
-- 임시 파일에 수정 내용을 저장하여 비교
+**구현 내용**:
+- `vscode.commands.executeCommand('vscode.diff')` 활용하여 변경 전/후 비교 뷰 표시
+- Operations Panel에 각 오퍼레이션마다 "Preview" 버튼 추가
+- CREATE: 빈 파일 vs 새 내용 비교
+- EDIT: 기존 파일 vs 수정된 내용 비교 (SEARCH/REPLACE 블록 자동 적용)
+- DELETE: 파일 미리보기 + 경고 메시지
+- `TextDocumentContentProvider`를 사용하여 임시 URI(`tokamak-preview:`)로 수정 내용 제공
 
-**관련 파일**: `src/chat/chatPanel.ts` → `previewFileOperation()` 함수 개선
+**수정된 파일**: `src/chat/chatPanel.ts` → `previewFileOperation()` 함수 완성
 
 ---
 
-### 2.3 대화 히스토리 관리 UI
+### ✅ 2.3 토큰 사용량 표시
+
+**✅ 구현 완료** (2026-02-17)
+
+**구현 내용**:
+- OpenAI API의 `stream_options: { include_usage: true }` 활용하여 스트리밍 중 토큰 사용량 수집
+- `streamChatCompletion()` 함수 리팩토링:
+  - 반환 타입을 `StreamResult` 객체로 변경 (`{ content: AsyncGenerator, usage: Promise<TokenUsage> }`)
+  - 스트리밍 완료 후 토큰 사용량 정보를 Promise로 제공
+- 웹뷰 하단에 토큰 사용량 표시 바 추가:
+  - 총 토큰 수 (Total)
+  - 프롬프트 토큰 수 (Prompt)
+  - 완성 토큰 수 (Completion)
+- 세션별 누적 토큰 추적 (New Chat 시 리셋)
+- 천 단위 구분 기호 표시 (예: 1,234 tokens)
+
+**수정된 파일**:
+- `src/api/client.ts` → `streamChatCompletion()` API 변경, `TokenUsage` 인터페이스 추가
+- `src/chat/chatPanel.ts` → 토큰 사용량 UI 추가 및 업데이트 로직
+- `src/agent/engine.ts` → 새로운 API 사용
+- `src/agent/summarizer.ts` → 새로운 API 사용
+- `src/chat/chatViewProvider.ts` → 새로운 API 사용
+
+---
+
+### 2.4 대화 히스토리 관리 UI
 
 **현재 문제**: 대화 기록이 자동 저장되지만 이전 세션을 브라우징/복원하는 UI가 없음
 
@@ -115,19 +143,6 @@
 - 대화 삭제/내보내기(Export) 기능
 
 **관련 파일**: `src/chat/chatPanel.ts` → 웹뷰 HTML에 히스토리 패널 추가
-
----
-
-### 2.4 토큰 사용량 표시
-
-**현재 문제**: 얼마나 많은 토큰을 소비하고 있는지 사용자가 알 수 없음
-
-**구현 계획**:
-- API 응답의 `usage` 필드에서 토큰 수 추출
-- 채팅 패널 하단에 세션 누적 토큰 사용량 표시
-- 토큰 예산(tokenBudget) 대비 사용률 경고
-
-**관련 파일**: `src/api/client.ts`, `src/chat/chatPanel.ts`
 
 ---
 
@@ -189,8 +204,8 @@
 | ~~🥈~~ | ~~Reflecting 상태 구현~~ | ⭐⭐ | ⭐⭐⭐⭐ | 1 | ✅ 완료 |
 | ~~🥉~~ | ~~Replan 기능~~ | ⭐⭐⭐ | ⭐⭐⭐⭐ | 1 | ✅ 완료 |
 | ~~4~~ | ~~파일 내용 검색~~ | ⭐⭐ | ⭐⭐⭐⭐ | 2 | ✅ 완료 |
-| 5 | Diff 미리보기 | ⭐⭐⭐ | ⭐⭐⭐ | 2 | 🔜 다음 |
-| 6 | 토큰 사용량 표시 | ⭐ | ⭐⭐⭐ | 2 | |
+| ~~5~~ | ~~Diff 미리보기~~ | ⭐⭐⭐ | ⭐⭐⭐ | 2 | ✅ 완료 |
+| ~~6~~ | ~~토큰 사용량 표시~~ | ⭐ | ⭐⭐⭐ | 2 | ✅ 완료 |
 | 7 | 대화 히스토리 UI | ⭐⭐⭐ | ⭐⭐⭐ | 2 | |
 | 8 | Git 통합 | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | 3 | |
 | 9 | 프로젝트 지식 베이스 | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | 3 | |
@@ -199,8 +214,7 @@
 
 ---
 
-> 🎉 **Phase 1 완료!** (2026-02-17)  
-> 터미널 출력 캡처, Reflecting 상태, Replan 기능이 모두 구현되어 에이전트의 자율성이 크게 향상되었습니다.  
-> 이제 "코드 작성 → 실행 → 에러 확인 → AI 평가 → 자동 수정"이라는 완전한 개발 루프가 완성되었습니다!
+> 🎉 **Phase 2 진행 중!** (2026-02-17)  
+> 파일 내용 검색, Diff 미리보기, 토큰 사용량 표시 기능이 모두 완료되어 개발 경험이 크게 향상되었습니다!  
 > 
-> 💡 **다음 단계**: Phase 2의 **파일 내용 검색** 기능을 구현하면 AI가 프로젝트 내부의 함수/클래스를 더 정확하게 찾아 컨텍스트에 포함할 수 있습니다.
+> 💡 **다음 단계**: **대화 히스토리 관리 UI**를 구현하면 이전 대화를 쉽게 찾아보고 복원할 수 있습니다.
