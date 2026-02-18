@@ -1590,15 +1590,9 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
                     // Agent 모드에서는 파일이 자동으로 생성되므로 Pending Operations로 표시하지 않음
                     this.pendingOperations = [];
                     this.panel.webview.postMessage({ command: 'operationsCleared' });
-                    } else {
-                        // FILE_OPERATION이 없으면 AgentEngine의 자율 루프 시작
-                        // (터미널 명령 실행 등이 필요한 경우)
-                        if (this.agentEngine) {
-                            this.agentEngine.updateContext({ userInput: text, history: this.chatHistory });
-                            await this.agentEngine.transitionTo('Planning');
-                            await this.agentEngine.run();
-                        }
                     }
+                    // FILE_OPERATION이 없으면 일반 채팅 응답으로 처리 (Plan 자동 생성하지 않음)
+                    // 사용자가 명시적으로 Plan을 요청하거나 복잡한 작업을 요청할 때만 AgentEngine 사용
                 }
 
                 // Handle READ operations automatically
@@ -1711,56 +1705,114 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             return;
         }
 
+        // 여러 줄 명령어를 개별 명령어로 분리
+        const commands = command
+            .split('\n')
+            .map(line => line.trim())
+            .filter(line => line.length > 0 && !line.startsWith('#')); // 빈 줄과 주석 제거
+
+        if (commands.length === 0) {
+            vscode.window.showWarningMessage('No valid commands found');
+            return;
+        }
+
         // Show terminal for user visibility
         let terminal = vscode.window.terminals.find(t => t.name === 'Tokamak');
         if (!terminal) {
             terminal = vscode.window.createTerminal('Tokamak');
         }
         terminal.show();
-        terminal.sendText(command);
 
-        // Execute and capture output
-        vscode.window.showInformationMessage(`Running: ${command}`);
-
+        // 각 명령어를 순차적으로 실행
+        let allOutput = '';
+        let currentCwd = workspaceFolder.uri.fsPath; // 현재 작업 디렉토리 추적
+        
         try {
-            const { exec } = require('child_process');
-            const cwd = workspaceFolder.uri.fsPath;
-
-            const result = await new Promise<string>((resolve) => {
-                exec(command, { cwd, timeout: 30000, maxBuffer: 1024 * 1024 }, (error: any, stdout: string, stderr: string) => {
-                    let output = '';
-
-                    if (stdout) {
-                        output += `[STDOUT]\n${stdout}\n`;
+            for (let i = 0; i < commands.length; i++) {
+                const cmd = commands[i];
+                
+                // cd 명령어 처리 (단, && || ; 같은 연산자가 포함된 경우는 그대로 실행)
+                // && || ; 가 포함된 명령어는 cd로 인식하지 않고 그대로 실행
+                if (!cmd.includes('&&') && !cmd.includes('||') && !cmd.includes(';')) {
+                    // cd 명령어가 정확히 "cd 경로" 형태일 때만 처리
+                    const cdMatch = cmd.match(/^cd\s+([^\s&|;]+)$/);
+                    if (cdMatch) {
+                        const targetDir = cdMatch[1].trim();
+                        // 상대 경로인 경우 현재 cwd 기준으로 해석
+                        const newCwd = require('path').isAbsolute(targetDir) 
+                            ? targetDir 
+                            : require('path').join(currentCwd, targetDir);
+                        currentCwd = newCwd;
+                        // 터미널에만 cd 명령어 전송 (exec는 cwd 옵션으로 처리)
+                        terminal.sendText(cmd);
+                        allOutput += `\n--- Command ${i + 1}/${commands.length}: ${cmd} ---\n(Changed directory to: ${currentCwd})\n`;
+                        continue;
                     }
+                }
+                
+                // 터미널에 명령어 표시 및 실행
+                terminal.sendText(cmd);
+                
+                // Execute and capture output
+                vscode.window.showInformationMessage(`Running (${i + 1}/${commands.length}): ${cmd}`);
 
-                    if (stderr) {
-                        output += `[STDERR]\n${stderr}\n`;
+                try {
+                    const { exec } = require('child_process');
+
+                    // && || ; 같은 연산자가 포함된 명령어는 셸을 통해 실행
+                    // cd 명령어도 셸 내부 명령어이므로 셸을 통해 실행해야 함
+                    const shellCmd = process.platform === 'win32' 
+                        ? `cmd /c "${cmd}"` 
+                        : `/bin/bash -c "${cmd.replace(/"/g, '\\"')}"`;
+
+                    const result = await new Promise<string>((resolve) => {
+                        exec(shellCmd, { cwd: currentCwd, timeout: 30000, maxBuffer: 1024 * 1024 }, (error: any, stdout: string, stderr: string) => {
+                            let output = '';
+
+                            if (stdout) {
+                                output += `[STDOUT]\n${stdout}\n`;
+                            }
+
+                            if (stderr) {
+                                output += `[STDERR]\n${stderr}\n`;
+                            }
+
+                            if (error) {
+                                output += `[ERROR] Exit code: ${error.code}\n${error.message}\n`;
+                            }
+
+                            if (!output) {
+                                output = '(Command executed with no output)';
+                            }
+
+                            resolve(output);
+                        });
+                    });
+
+                    allOutput += `\n--- Command ${i + 1}/${commands.length}: ${cmd} ---\n${result}\n`;
+                    
+                    // 에러가 발생하면 중단 (선택적 - 필요시 계속 진행하도록 변경 가능)
+                    if (result.includes('[ERROR]')) {
+                        break;
                     }
+                } catch (error) {
+                    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+                    allOutput += `\n--- Command ${i + 1}/${commands.length}: ${cmd} ---\n[ERROR] ${errorMsg}\n`;
+                    break;
+                }
+            }
 
-                    if (error) {
-                        output += `[ERROR] Exit code: ${error.code}\n${error.message}\n`;
-                    }
-
-                    if (!output) {
-                        output = '(Command executed with no output)';
-                    }
-
-                    resolve(output);
-                });
-            });
-
-            // Send result to AI automatically
+            // 모든 명령어 실행 결과를 한 번에 표시
             this.panel.webview.postMessage({
                 command: 'addMessage',
                 role: 'assistant',
-                content: `**Command executed:** \`${command}\`\n\n**Result:**\n\`\`\`\n${result}\n\`\`\``,
+                content: `**Commands executed:**\n\`\`\`\n${commands.join('\n')}\n\`\`\`\n\n**Results:**\n\`\`\`\n${allOutput.trim()}\n\`\`\``,
             });
 
             // Add to history
             this.chatHistory.push({
                 role: 'assistant',
-                content: `Command: ${command}\nResult:\n${result}`,
+                content: `Commands: ${commands.join('; ')}\nResults:\n${allOutput.trim()}`,
             });
 
             this.saveChatHistory();
@@ -3112,6 +3164,8 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             }
 
             let isSending = false;
+            let isComposing = false; // IME 입력 중인지 추적
+            
             function sendMessage() {
             if (isSending) return;
 
@@ -3128,7 +3182,13 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             attachedImages: attachedImages
             });
 
+            // 입력 필드를 비우고 IME 상태 리셋
             messageInput.value = '';
+            messageInput.blur(); // IME 상태 리셋
+            setTimeout(() => {
+                messageInput.focus(); // 다시 포커스
+            }, 10);
+            
             messageInput.style.height = 'auto';
             attachedFiles = [];
             attachedImages = [];
@@ -3312,6 +3372,15 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             vscode.postMessage({ command: 'newChat' });
             });
 
+            // IME 입력 시작/종료 추적
+            messageInput.addEventListener('compositionstart', () => {
+            isComposing = true;
+            });
+            
+            messageInput.addEventListener('compositionend', () => {
+            isComposing = false;
+            });
+            
             messageInput.addEventListener('keydown', (e) => {
             if (autocomplete.classList.contains('visible')) {
             if (e.key === 'ArrowDown') {
@@ -3336,7 +3405,8 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             }
             }
 
-            if (e.key === 'Enter' && !e.shiftKey) {
+            // IME 입력 중이 아닐 때만 메시지 전송
+            if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
             e.preventDefault();
             sendMessage();
             }
@@ -3490,8 +3560,11 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
 
             function updateAgentStatusUI(state) {
             agentStatusBadge.textContent = state;
-            if (state !== 'Idle' && state !== 'Done' && state !== 'Error') {
+            // Plan Panel은 Plan 모드일 때만 표시 (Agent 모드에서 자동 Plan 생성 방지)
+            if (currentMode === 'plan' && state !== 'Idle' && state !== 'Done' && state !== 'Error') {
             planPanel.classList.add('visible');
+            } else if (currentMode !== 'plan') {
+            planPanel.classList.remove('visible');
             }
             }
 
@@ -3558,7 +3631,13 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             return;
             }
 
+            // Plan Panel은 Plan 모드일 때만 표시
+            if (currentMode === 'plan') {
             planPanel.classList.add('visible');
+            } else {
+            planPanel.classList.remove('visible');
+            return;
+            }
             planList.innerHTML = '';
 
             plan.forEach(step => {
