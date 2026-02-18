@@ -63,8 +63,15 @@ export class Executor {
                     const docLines = currentContent.split('\n').length;
                     edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)), currentContent);
 
-                    const success = await vscode.workspace.applyEdit(edit);
+                    const success = await vscode.workspace.applyEdit(edit, { save: true });
                     if (success) {
+                        // 파일 명시적으로 저장
+                        try {
+                            const doc = await vscode.workspace.openTextDocument(fileUri);
+                            await doc.save();
+                        } catch {
+                            // 파일이 아직 열리지 않았으면 무시 (이미 저장됨)
+                        }
                         return `Successfully updated ${path} via WorkspaceEdit.`;
                     } else {
                         // applyEdit 실패 시 FileSystem API로 폴백
@@ -86,8 +93,15 @@ export class Executor {
                     edit.insert(fileUri, new vscode.Position(0, 0), content);
                 }
 
-                const success = await vscode.workspace.applyEdit(edit);
+                const success = await vscode.workspace.applyEdit(edit, { save: true });
                 if (success) {
+                    // 파일 명시적으로 저장
+                    try {
+                        const doc = await vscode.workspace.openTextDocument(fileUri);
+                        await doc.save();
+                    } catch {
+                        // 파일이 아직 열리지 않았으면 무시 (이미 저장됨)
+                    }
                     return `Successfully wrote to ${path}`;
                 } else {
                     // 최종 폴백
@@ -100,7 +114,16 @@ export class Executor {
             const newFileEdit = new vscode.WorkspaceEdit();
             newFileEdit.createFile(fileUri, { overwrite: true });
             newFileEdit.insert(fileUri, new vscode.Position(0, 0), content);
-            await vscode.workspace.applyEdit(newFileEdit);
+            const success = await vscode.workspace.applyEdit(newFileEdit, { save: true });
+            if (success) {
+                // 파일 명시적으로 저장
+                try {
+                    const doc = await vscode.workspace.openTextDocument(fileUri);
+                    await doc.save();
+                } catch {
+                    // 파일이 아직 열리지 않았으면 무시 (이미 저장됨)
+                }
+            }
             return `Successfully created ${path}`;
         }
     }
@@ -274,10 +297,23 @@ export class Executor {
                 }
             }
 
-            // 3. 모든 작업을 한 번에 적용
-            const success = await vscode.workspace.applyEdit(edit);
+            // 3. 모든 작업을 한 번에 적용 및 저장
+            const success = await vscode.workspace.applyEdit(edit, { save: true });
 
             if (success) {
+                // 수정된 파일들을 명시적으로 저장
+                for (const op of operations) {
+                    if (op.operation === 'create' || op.operation === 'edit') {
+                        try {
+                            const fileUri = vscode.Uri.joinPath(workspaceFolder.uri, op.path);
+                            const doc = await vscode.workspace.openTextDocument(fileUri);
+                            await doc.save();
+                        } catch {
+                            // 파일이 아직 열리지 않았으면 무시 (이미 저장됨)
+                        }
+                    }
+                }
+
                 const fileList = operations.map(op => op.path).join(', ');
                 return `Successfully applied ${operations.length} file operation(s) atomically: ${fileList}`;
             } else {
@@ -301,7 +337,7 @@ export class Executor {
                         // 롤백 실패는 무시
                     }
                 }
-                await vscode.workspace.applyEdit(rollbackEdit);
+                await vscode.workspace.applyEdit(rollbackEdit, { save: true });
             }
 
             const errorMsg = error instanceof Error ? error.message : 'Unknown error';

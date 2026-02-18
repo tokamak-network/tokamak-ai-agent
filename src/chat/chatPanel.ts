@@ -913,37 +913,43 @@ export function helper() {
                 
                 // 백틱 코드 블록이 있는지 확인 (```로 시작)
                 if (contentText.startsWith('```')) {
-                    // 언어 지정 부분 건너뛰기
+                    // 언어 지정 부분 건너뛰기 (예: ```markdown, ```typescript 등)
                     const firstNewline = contentText.indexOf('\n');
                     if (firstNewline > 0) {
                         contentText = contentText.substring(firstNewline + 1);
                     } else {
-                        contentText = contentText.substring(3); // ``` 제거
+                        // 줄바꿈이 없으면 ```만 제거
+                        contentText = contentText.substring(3).trim();
                     }
                     
-                    // 닫는 백틱 찾기 (마지막 ```)
-                    // 중첩된 백틱을 고려하여 마지막 ```를 찾아야 함
-                    let backtickCount = 0;
+                    // 닫는 백틱 찾기: 뒤에서부터 검색하여 마지막 ``` 찾기
+                    // 이렇게 하면 코드 블록 내부에 ```가 있어도 정확하게 처리됨
                     let lastBacktickIndex = -1;
-                    let i = contentText.length - 1;
                     
-                    // 뒤에서부터 찾아서 마지막 ``` 찾기
-                    while (i >= 0) {
+                    // 뒤에서부터 검색 (마지막 닫는 백틱 찾기)
+                    for (let i = contentText.length - 3; i >= 0; i--) {
                         if (contentText.substring(i, i + 3) === '```') {
-                            lastBacktickIndex = i;
-                            break;
+                            // 이전 문자가 줄바꿈이거나 시작인지 확인 (진짜 닫는 백틱인지)
+                            const beforeChar = i > 0 ? contentText[i - 1] : '\n';
+                            if (beforeChar === '\n' || i === 0) {
+                                lastBacktickIndex = i;
+                                break;
+                            }
                         }
-                        i--;
                     }
                     
                     if (lastBacktickIndex >= 0) {
+                        // 닫는 백틱 전까지의 내용 추출
                         content = contentText.substring(0, lastBacktickIndex).trim();
                     } else {
-                        // 닫는 백틱이 없으면 끝까지 (스트리밍 중일 수 있음)
+                        // 닫는 백틱이 없으면 끝까지 (스트리밍 중이거나 누락된 경우)
+                        // 이 경우 전체 내용을 포함하여 파일이 잘리지 않도록 함
                         content = contentText.trim();
+                        console.warn(`[parseFileOperations] No closing backticks found for ${pathMatch?.[1]}, using full content`);
                     }
                 } else {
-                    // 백틱이 없으면 끝까지 (END_OPERATION 전까지)
+                    // 백틱이 없으면 CONTENT: 다음부터 블록 끝까지 전체 내용
+                    // 이렇게 하면 마크다운 파일의 모든 내용이 포함됨
                     content = contentText.trim();
                 }
             }
@@ -1038,12 +1044,32 @@ export function helper() {
             }
         }
 
-        // 일괄 실행
-        const success = await vscode.workspace.applyEdit(edit);
+        // 일괄 실행 및 자동 저장
+        const success = await vscode.workspace.applyEdit(edit, { save: true });
 
         if (success) {
             if (successCount > 0) {
-                vscode.window.showInformationMessage(`Successfully applied ${successCount} file operation(s).`);
+                // 수정된 파일들을 명시적으로 저장
+                const modifiedFiles: vscode.Uri[] = [];
+                for (const op of this.pendingOperations) {
+                    if (op.type === 'create' || op.type === 'edit') {
+                        const fileUri = vscode.Uri.joinPath(workspaceFolder.uri, op.path);
+                        modifiedFiles.push(fileUri);
+                    }
+                }
+
+                // 각 파일을 저장 (이미 열려있거나 새로 생성된 파일)
+                for (const fileUri of modifiedFiles) {
+                    try {
+                        const doc = await vscode.workspace.openTextDocument(fileUri);
+                        await doc.save();
+                    } catch (error) {
+                        // 파일이 아직 열리지 않았거나 저장할 수 없는 경우는 무시
+                        // WorkspaceEdit의 save 옵션이 처리함
+                    }
+                }
+
+                vscode.window.showInformationMessage(`Successfully applied and saved ${successCount} file operation(s).`);
             }
         } else {
             console.error('[ChatPanel] WorkspaceEdit failed. Check for read-only files or conflicting edits.');
