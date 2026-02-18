@@ -5,6 +5,7 @@ import { Executor } from './executor.js';
 import { Observer, DiagnosticInfo } from './observer.js';
 import { Searcher } from './searcher.js';
 import { ContextManager } from './contextManager.js';
+import { DependencyAnalyzer } from './dependencyAnalyzer.js';
 import { streamChatCompletion } from '../api/client.js';
 
 export class AgentEngine {
@@ -18,6 +19,7 @@ export class AgentEngine {
     private observer: Observer = new Observer();
     private searcher: Searcher = new Searcher();
     private contextManager: ContextManager;
+    private dependencyAnalyzer: DependencyAnalyzer = new DependencyAnalyzer();
     private lastDiagnostics: DiagnosticInfo[] = [];
 
     constructor(context: AgentContext) {
@@ -118,6 +120,8 @@ ${globalContext}
 1. **계획만 수립**: 이 단계에서는 어떤 파일을 수정할지 '목록'과 '설명'만 작성하세요.
 2. **코드 작성 금지**: 각 단계의 구체적인 코드는 나중에 실행 시점에 따로 요청할 것이므로, 지금은 코드를 포함하지 마세요. (토큰 절약 및 잘림 방지)
 3. **의존성**: 순서가 중요하다면 [depends: step-id]를 포함하세요.
+4. **멀티 파일 작업**: 여러 관련 파일(예: 컴포넌트 + 테스트 + 타입)을 함께 생성/수정해야 하는 경우, 하나의 단계로 묶어서 "여러 파일 생성" 또는 "관련 파일 수정"으로 표현하세요.
+   예: "- [ ] UserProfile 컴포넌트 및 관련 파일 생성 (UserProfile.tsx, UserProfile.test.tsx, UserProfile.styles.ts)"
 `;
 
             let aiResponse = '';
@@ -173,10 +177,33 @@ ${globalContext}
 프로젝트 상황:
 ${stepContext}
 
-위 단계를 실행하기 위한 구체적인 **JSON Action** 하나만 답변해주세요.
-- 파일 생성/수정 시: { "type": "write", "payload": { "path": "...", "content": "..." } }
-- 내용이 길 경우 반드시 **SEARCH/REPLACE** 형식을 사용하세요.
-- 답변에는 마크다운 없이 오직 JSON만 포함하거나, \`\`\`json 블록으로 감싸주세요.
+위 단계를 실행하기 위한 **JSON Action**을 생성해주세요.
+
+**단일 파일 작업**:
+{ "type": "write", "payload": { "path": "...", "content": "..." } }
+
+**여러 파일 동시 작업** (권장):
+여러 파일을 함께 생성/수정해야 하는 경우, multi_write를 사용하세요:
+{
+  "type": "multi_write",
+  "payload": {
+    "atomic": true,
+    "operations": [
+      { "operation": "create", "path": "file1.ts", "content": "..." },
+      { "operation": "edit", "path": "file2.ts", "content": "..." },
+      { "operation": "create", "path": "file3.ts", "content": "..." }
+    ]
+  }
+}
+
+**중요 지침**:
+1. 여러 관련 파일(컴포넌트, 테스트, 타입 등)을 함께 생성해야 할 때는 multi_write를 사용하세요.
+2. 파일 간 의존성이 있는 경우(import/export) 모든 파일을 한 번에 처리하세요.
+3. 내용이 길 경우 반드시 **SEARCH/REPLACE** 형식을 사용하세요.
+4. operation은 "create", "edit", "delete" 중 하나입니다.
+5. atomic: true로 설정하면 모든 작업이 성공해야 적용되고, 하나라도 실패하면 전체 롤백됩니다.
+
+답변에는 마크다운 없이 오직 JSON만 포함하거나, \`\`\`json 블록으로 감싸주세요.
 `;
                 let aiResponse = '';
                 const streamResult = streamChatCompletion([{ role: 'user', content: prompt }]);

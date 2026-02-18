@@ -154,14 +154,45 @@
 
 ## 🚀 Phase 3: 고도화 (장기)
 
-### 3.1 멀티 파일 동시 편집 지원
+### ✅ 3.1 멀티 파일 동시 편집 지원
 
-**현재 문제**: 에이전트가 한 번에 하나의 파일만 처리
+**✅ 구현 완료** (2026-02-17)
 
-**구현 계획**:
-- 여러 파일을 병렬로 읽기/수정하는 워크플로우
-- 파일 간 의존성 분석 (import/export 관계)
-- Atomic 트랜잭션 패턴: 모든 편집이 성공해야 적용, 하나라도 실패하면 전체 롤백
+**구현 내용**:
+- `multi_write` 액션 타입 추가: 여러 파일을 한 번에 처리
+- 파일 간 의존성 분석 기능 (`DependencyAnalyzer` 클래스)
+  - import/export 관계 파싱
+  - 의존성 그래프 구축
+  - 영향받는 파일 자동 탐지
+- Atomic 트랜잭션 패턴 구현
+  - 모든 편집이 성공해야 적용
+  - 하나라도 실패하면 전체 롤백 (백업 기반)
+  - Non-atomic 모드도 지원 (순차 실행, 실패해도 계속)
+- 에이전트 엔진 프롬프트 개선
+  - Planning 단계에서 멀티 파일 작업 인식
+  - Execution 단계에서 `multi_write` 액션 생성 지원
+- SEARCH/REPLACE 형식 지원 (멀티 파일에서도 동작)
+
+**사용 예시**:
+```json
+{
+  "type": "multi_write",
+  "payload": {
+    "atomic": true,
+    "operations": [
+      { "operation": "create", "path": "Component.tsx", "content": "..." },
+      { "operation": "create", "path": "Component.test.tsx", "content": "..." },
+      { "operation": "edit", "path": "index.ts", "content": "<<<<<<< SEARCH\n...\n=======\n...\n>>>>>>> REPLACE" }
+    ]
+  }
+}
+```
+
+**수정된 파일**:
+- `src/agent/dependencyAnalyzer.ts` → 새로 생성 (의존성 분석)
+- `src/agent/types.ts` → `MultiFileOperation`, `MultiWritePayload` 인터페이스 추가
+- `src/agent/executor.ts` → `multiWrite()` 메서드 및 Atomic 트랜잭션 구현
+- `src/agent/engine.ts` → 멀티 파일 작업 프롬프트 및 의존성 분석기 통합
 
 ---
 
@@ -214,10 +245,11 @@
 | ~~5~~ | ~~Diff 미리보기~~ | ⭐⭐⭐ | ⭐⭐⭐ | 2 | ✅ 완료 |
 | ~~6~~ | ~~토큰 사용량 표시~~ | ⭐ | ⭐⭐⭐ | 2 | ✅ 완료 |
 | ~~7~~ | ~~대화 히스토리 UI~~ | ⭐⭐⭐ | ⭐⭐⭐ | 2 | ✅ 완료 |
-| 8 | Git 통합 | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | 3 | |
-| 9 | 프로젝트 지식 베이스 | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | 3 | |
-| 10 | 웹 검색 통합 | ⭐⭐⭐ | ⭐⭐⭐ | 3 | |
-| 11 | MCP 지원 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | 3 | |
+| ~~8~~ | ~~멀티 파일 동시 편집~~ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | 3 | ✅ 완료 |
+| 9 | Git 통합 | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | 3 | |
+| 10 | 프로젝트 지식 베이스 | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | 3 | |
+| 11 | 웹 검색 통합 | ⭐⭐⭐ | ⭐⭐⭐ | 3 | |
+| 12 | MCP 지원 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | 3 | |
 
 ---
 

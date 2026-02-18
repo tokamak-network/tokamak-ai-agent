@@ -36,6 +36,17 @@ export interface AgentContext {
 }
 
 export interface AgentAction {
-    type: 'write' | 'read' | 'run' | 'search' | 'ask_user' | 'delete';
+    type: 'write' | 'read' | 'run' | 'search' | 'ask_user' | 'delete' | 'multi_write';
     payload: any;
+}
+
+export interface MultiFileOperation {
+    path: string;
+    content: string;
+    operation: 'create' | 'edit' | 'delete';
+}
+
+export interface MultiWritePayload {
+    operations: MultiFileOperation[];
+    atomic?: boolean; // Atomic 트랜잭션 여부 (기본값: true)
 }
