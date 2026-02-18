@@ -9,6 +9,7 @@ const contextManager_js_1 = require("./contextManager.js");
 const dependencyAnalyzer_js_1 = require("./dependencyAnalyzer.js");
 const checkpointManager_js_1 = require("./checkpointManager.js");
 const client_js_1 = require("../api/client.js");
+const settings_js_1 = require("../config/settings.js");
 class AgentEngine {
     state = 'Idle';
     plan = [];
@@ -26,13 +27,16 @@ class AgentEngine {
     constructor(context) {
         this.context = context;
         this.contextManager = new contextManager_js_1.ContextManager(this.executor);
-        // ExtensionContext가 있으면 CheckpointManager 초기화
-        if (context.extensionContext) {
+        // ExtensionContext가 있고 checkpoint 기능이 활성화되어 있으면 CheckpointManager 초기화
+        if (context.extensionContext && (0, settings_js_1.isCheckpointsEnabled)()) {
             this.checkpointManager = new checkpointManager_js_1.CheckpointManager(context.extensionContext);
             // 체크포인트 로드
             this.checkpointManager.loadCheckpoints().catch(err => {
                 console.warn('[AgentEngine] Failed to load checkpoints:', err);
             });
+        }
+        else if (!(0, settings_js_1.isCheckpointsEnabled)()) {
+            console.log('[AgentEngine] Checkpoints disabled in settings');
         }
     }
     async transitionTo(nextState) {
@@ -121,6 +125,10 @@ ${globalContext}
 3. **의존성**: 순서가 중요하다면 [depends: step-id]를 포함하세요.
 4. **멀티 파일 작업**: 여러 관련 파일(예: 컴포넌트 + 테스트 + 타입)을 함께 생성/수정해야 하는 경우, 하나의 단계로 묶어서 "여러 파일 생성" 또는 "관련 파일 수정"으로 표현하세요.
    예: "- [ ] UserProfile 컴포넌트 및 관련 파일 생성 (UserProfile.tsx, UserProfile.test.tsx, UserProfile.styles.ts)"
+5. **터미널 명령 실행**: 의존성 설치, 테스트 실행, 빌드 등 터미널 명령이 필요한 경우 명시하세요.
+   예: "- [ ] npm install 실행하여 의존성 설치"
+   예: "- [ ] npm test 실행하여 테스트 통과 확인"
+   예: "- [ ] npm run build 실행하여 빌드 성공 확인"
 `;
             let aiResponse = '';
             const streamResult = (0, client_js_1.streamChatCompletion)([{ role: 'user', content: prompt }]);
@@ -162,18 +170,23 @@ ${globalContext}
         let checkpointId;
         if (this.checkpointManager) {
             try {
+                console.log(`[AgentEngine] Creating checkpoint before step: ${step.id} - ${step.description}`);
                 checkpointId = await this.checkpointManager.createCheckpoint(step.description, step.id, JSON.parse(JSON.stringify(this.plan)), // 깊은 복사
                 {
                     state: this.state,
                     currentStepIndex: this.currentStepIndex,
                 });
+                console.log(`[AgentEngine] Checkpoint created: ${checkpointId}`);
                 if (this.context.onCheckpointCreated) {
                     this.context.onCheckpointCreated(checkpointId);
                 }
             }
             catch (error) {
-                console.warn('[AgentEngine] Failed to create checkpoint:', error);
+                console.error('[AgentEngine] Failed to create checkpoint:', error);
             }
+        }
+        else {
+            console.warn('[AgentEngine] CheckpointManager not available - extensionContext may not be set');
         }
         try {
             let action = null;
@@ -208,12 +221,24 @@ ${stepContext}
   }
 }
 
+**터미널 명령 실행**:
+의존성 설치, 테스트 실행, 빌드, 컴파일 등 터미널 명령이 필요한 경우 run을 사용하세요:
+{ "type": "run", "payload": { "command": "npm install" } }
+{ "type": "run", "payload": { "command": "npm test" } }
+{ "type": "run", "payload": { "command": "npm run build" } }
+{ "type": "run", "payload": { "command": "tsc --noEmit" } }
+
 **중요 지침**:
 1. 여러 관련 파일(컴포넌트, 테스트, 타입 등)을 함께 생성해야 할 때는 multi_write를 사용하세요.
 2. 파일 간 의존성이 있는 경우(import/export) 모든 파일을 한 번에 처리하세요.
 3. 내용이 길 경우 반드시 **SEARCH/REPLACE** 형식을 사용하세요.
 4. operation은 "create", "edit", "delete" 중 하나입니다.
 5. atomic: true로 설정하면 모든 작업이 성공해야 적용되고, 하나라도 실패하면 전체 롤백됩니다.
+6. **터미널 명령 실행**: 파일 작업 외에 의존성 설치, 테스트, 빌드 등이 필요한 경우 run 액션을 사용하세요.
+   - npm/yarn/pip 등 패키지 매니저 명령
+   - 테스트 실행 (npm test, pytest 등)
+   - 빌드/컴파일 (npm run build, tsc 등)
+   - 린트/포맷팅 (npm run lint, prettier 등)
 
 답변에는 마크다운 없이 오직 JSON만 포함하거나, \`\`\`json 블록으로 감싸주세요.
 `;
@@ -242,8 +267,26 @@ ${stepContext}
                 }
             }
             if (action) {
+                // 터미널 명령 실행 전 메시지 표시
+                if (action.type === 'run' && this.context.onMessage) {
+                    this.context.onMessage('assistant', `🔧 Executing: \`${action.payload.command}\``);
+                }
                 const result = await this.executor.execute(action);
                 step.result = result;
+                // 실행 결과를 메시지로 표시
+                if (this.context.onMessage) {
+                    const resultPreview = result.length > 500
+                        ? result.substring(0, 500) + '\n... (truncated)'
+                        : result;
+                    if (action.type === 'run') {
+                        // 터미널 명령 결과를 코드 블록으로 표시
+                        this.context.onMessage('assistant', `\`\`\`\n${resultPreview}\n\`\`\``);
+                    }
+                    else {
+                        // 파일 작업 결과는 간단히 표시
+                        this.context.onMessage('assistant', `✅ ${result}`);
+                    }
+                }
             }
             else {
                 step.result = 'No executable action found for this step.';

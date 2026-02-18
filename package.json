@@ -66,6 +66,11 @@
           "type": "number",
           "default": 300,
           "description": "Debounce delay in milliseconds for inline completions"
+        },
+        "tokamak.enableCheckpoints": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable checkpoint feature. Checkpoints automatically save workspace state before each step in Agent mode, allowing you to restore to previous states."
         }
       }
     },

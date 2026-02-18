@@ -63,14 +63,14 @@ export class Executor {
                     const docLines = currentContent.split('\n').length;
                     edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)), currentContent);
 
-                    const success = await vscode.workspace.applyEdit(edit, { save: true });
+                    const success = await vscode.workspace.applyEdit(edit);
                     if (success) {
                         // 파일 명시적으로 저장
                         try {
                             const doc = await vscode.workspace.openTextDocument(fileUri);
                             await doc.save();
                         } catch {
-                            // 파일이 아직 열리지 않았으면 무시 (이미 저장됨)
+                            // 파일이 아직 열리지 않았으면 무시
                         }
                         return `Successfully updated ${path} via WorkspaceEdit.`;
                     } else {
@@ -93,14 +93,14 @@ export class Executor {
                     edit.insert(fileUri, new vscode.Position(0, 0), content);
                 }
 
-                const success = await vscode.workspace.applyEdit(edit, { save: true });
+                const success = await vscode.workspace.applyEdit(edit);
                 if (success) {
                     // 파일 명시적으로 저장
                     try {
                         const doc = await vscode.workspace.openTextDocument(fileUri);
                         await doc.save();
                     } catch {
-                        // 파일이 아직 열리지 않았으면 무시 (이미 저장됨)
+                        // 파일이 아직 열리지 않았으면 무시
                     }
                     return `Successfully wrote to ${path}`;
                 } else {
@@ -114,14 +114,14 @@ export class Executor {
             const newFileEdit = new vscode.WorkspaceEdit();
             newFileEdit.createFile(fileUri, { overwrite: true });
             newFileEdit.insert(fileUri, new vscode.Position(0, 0), content);
-            const success = await vscode.workspace.applyEdit(newFileEdit, { save: true });
+            const success = await vscode.workspace.applyEdit(newFileEdit);
             if (success) {
                 // 파일 명시적으로 저장
                 try {
                     const doc = await vscode.workspace.openTextDocument(fileUri);
                     await doc.save();
                 } catch {
-                    // 파일이 아직 열리지 않았으면 무시 (이미 저장됨)
+                    // 파일이 아직 열리지 않았으면 무시
                 }
             }
             return `Successfully created ${path}`;
@@ -152,31 +152,56 @@ export class Executor {
             throw new Error('No workspace folder open');
         }
 
-        return new Promise((resolve) => {
-            const { exec } = require('child_process');
-            const cwd = workspaceFolder.uri.fsPath;
-
-            exec(command, { cwd, timeout: 30000, maxBuffer: 1024 * 1024 }, (error: any, stdout: string, stderr: string) => {
-                let result = '';
-
-                if (stdout) {
-                    result += `[STDOUT]\n${stdout}\n`;
+        return new Promise(async (resolve, reject) => {
+            try {
+                // VS Code 터미널 생성 또는 재사용
+                const terminalName = 'Tokamak Agent';
+                let terminal = vscode.window.terminals.find(t => t.name === terminalName);
+                
+                if (!terminal) {
+                    terminal = vscode.window.createTerminal({
+                        name: terminalName,
+                        cwd: workspaceFolder.uri.fsPath
+                    });
                 }
 
-                if (stderr) {
-                    result += `[STDERR]\n${stderr}\n`;
-                }
+                // 터미널 표시
+                terminal.show(true);
 
-                if (error) {
-                    result += `[ERROR] Exit code: ${error.code}\n${error.message}\n`;
-                }
+                // 명령 실행 및 출력 캡처
+                const { exec } = require('child_process');
+                const cwd = workspaceFolder.uri.fsPath;
 
-                if (!result) {
-                    result = '(Command executed with no output)';
-                }
+                // 터미널에 명령 표시
+                terminal.sendText(`echo "[Tokamak Agent] Executing: ${command}"`);
+                terminal.sendText(command);
 
-                resolve(result);
-            });
+                // 출력 캡처 (child_process로 실행하여 결과 반환)
+                exec(command, { cwd, timeout: 30000, maxBuffer: 1024 * 1024 }, (error: any, stdout: string, stderr: string) => {
+                    let result = '';
+
+                    if (stdout) {
+                        result += `[STDOUT]\n${stdout}\n`;
+                    }
+
+                    if (stderr) {
+                        result += `[STDERR]\n${stderr}\n`;
+                    }
+
+                    if (error) {
+                        result += `[ERROR] Exit code: ${error.code}\n${error.message}\n`;
+                        // 에러가 있어도 결과는 반환 (Agent가 판단하도록)
+                    }
+
+                    if (!result) {
+                        result = '(Command executed with no output)';
+                    }
+
+                    resolve(result);
+                });
+            } catch (error) {
+                reject(error instanceof Error ? error : new Error('Unknown error'));
+            }
         });
     }
 
@@ -267,8 +292,7 @@ export class Executor {
                                 const docLines = currentContent.split('\n').length;
                                 edit.replace(
                                     fileUri,
-                                    new vscode.Position(0, 0),
-                                    new vscode.Position(docLines + 1, 0),
+                                    new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)),
                                     currentContent
                                 );
                             } else {
@@ -298,7 +322,7 @@ export class Executor {
             }
 
             // 3. 모든 작업을 한 번에 적용 및 저장
-            const success = await vscode.workspace.applyEdit(edit, { save: true });
+            const success = await vscode.workspace.applyEdit(edit);
 
             if (success) {
                 // 수정된 파일들을 명시적으로 저장
@@ -337,7 +361,7 @@ export class Executor {
                         // 롤백 실패는 무시
                     }
                 }
-                await vscode.workspace.applyEdit(rollbackEdit, { save: true });
+                await vscode.workspace.applyEdit(rollbackEdit);
             }
 
             const errorMsg = error instanceof Error ? error.message : 'Unknown error';

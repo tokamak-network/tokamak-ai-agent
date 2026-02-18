@@ -38,6 +38,7 @@ const vscode = __importStar(require("vscode"));
 const client_js_1 = require("../api/client.js");
 const settings_js_1 = require("../config/settings.js");
 const engine_js_1 = require("../agent/engine.js");
+const executor_js_1 = require("../agent/executor.js");
 // 기본 내장 스킬 (파일이 없을 때 사용)
 const BUILTIN_SKILLS = [
     {
@@ -120,11 +121,26 @@ class ChatPanel {
             workspacePath: workspaceFolder?.uri.fsPath || '',
             maxFixAttempts: 3,
             tokenBudget: 4000,
+            extensionContext: ChatPanel.extensionContext,
             onStateChange: (state) => {
                 this.panel.webview.postMessage({ command: 'agentStateChanged', state });
             },
             onPlanChange: (plan) => {
                 this.panel.webview.postMessage({ command: 'updatePlan', plan });
+            },
+            onMessage: (role, content) => {
+                // Agent 실행 중 메시지 표시 (터미널 실행 결과 등)
+                this.panel.webview.postMessage({
+                    command: 'addMessage',
+                    role: role,
+                    content: content
+                });
+            },
+            onCheckpointCreated: (checkpointId) => {
+                console.log(`[ChatPanel] Checkpoint created callback: ${checkpointId}`);
+                this.panel.webview.postMessage({ command: 'checkpointCreated', checkpointId });
+                // 즉시 checkpoints 목록 새로고침
+                this.getCheckpoints();
             }
         };
         this.agentEngine = new engine_js_1.AgentEngine(context);
@@ -143,17 +159,29 @@ class ChatPanel {
             case 'selectMode':
                 this.currentMode = message.mode;
                 this.saveChatHistory();
-                this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
+                this.panel.webview.postMessage({
+                    command: 'modeChanged',
+                    mode: this.currentMode,
+                    checkpointsEnabled: (0, settings_js_1.isCheckpointsEnabled)()
+                });
                 break;
             case 'ready':
                 this.updateModelList();
-                this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
+                this.panel.webview.postMessage({
+                    command: 'modeChanged',
+                    mode: this.currentMode,
+                    checkpointsEnabled: (0, settings_js_1.isCheckpointsEnabled)()
+                });
                 this.sendRestoredHistory();
+                // Agent 모드이고 checkpoint가 활성화된 경우에만 체크포인트 로드
+                if (this.currentMode === 'agent' && (0, settings_js_1.isCheckpointsEnabled)()) {
+                    await this.getCheckpoints();
+                }
                 break;
             case 'getSessions':
                 this.panel.webview.postMessage({
                     command: 'sessionsList',
-                    sessions: this.sessions.map(s => ({ id: s.id, title: s.title, timestamp: s.timestamp })),
+                    sessions: this.sessions.map(s => ({ id: s.id, title: s.title, timestamp: s.timestamp, mode: s.mode })),
                     currentSessionId: this.currentSessionId
                 });
                 break;
@@ -165,7 +193,11 @@ class ChatPanel {
                     this.chatHistory = session.messages;
                     this.currentMode = session.mode;
                     this.panel.webview.postMessage({ command: 'clearMessages' });
-                    this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
+                    this.panel.webview.postMessage({
+                        command: 'modeChanged',
+                        mode: this.currentMode,
+                        checkpointsEnabled: (0, settings_js_1.isCheckpointsEnabled)()
+                    });
                     this.sendRestoredHistory();
                 }
                 break;
@@ -179,9 +211,12 @@ class ChatPanel {
                 }
                 this.panel.webview.postMessage({
                     command: 'sessionsList',
-                    sessions: this.sessions.map(s => ({ id: s.id, title: s.title, timestamp: s.timestamp })),
+                    sessions: this.sessions.map(s => ({ id: s.id, title: s.title, timestamp: s.timestamp, mode: s.mode })),
                     currentSessionId: this.currentSessionId
                 });
+                break;
+            case 'exportSession':
+                await this.exportSession(message.sessionId);
                 break;
             case 'searchFiles':
                 await this.searchFiles(message.query);
@@ -231,6 +266,18 @@ class ChatPanel {
                 break;
             case 'searchSlashCommands':
                 await this.searchSlashCommands(message.query);
+                break;
+            case 'getCheckpoints':
+                await this.getCheckpoints();
+                break;
+            case 'compareCheckpoint':
+                await this.compareCheckpoint(message.checkpointId);
+                break;
+            case 'restoreCheckpoint':
+                await this.restoreCheckpoint(message.checkpointId, message.restoreWorkspaceOnly || false);
+                break;
+            case 'deleteCheckpoint':
+                await this.deleteCheckpoint(message.checkpointId);
                 break;
         }
     }
@@ -325,6 +372,44 @@ class ChatPanel {
                     content: message.content,
                 });
             }
+        }
+    }
+    async exportSession(sessionId) {
+        const session = this.sessions.find(s => s.id === sessionId);
+        if (!session) {
+            vscode.window.showErrorMessage('Session not found');
+            return;
+        }
+        try {
+            // Format session data as JSON
+            const exportData = {
+                title: session.title,
+                mode: session.mode,
+                timestamp: session.timestamp,
+                date: new Date(session.timestamp).toISOString(),
+                messages: session.messages.map(msg => ({
+                    role: msg.role,
+                    content: typeof msg.content === 'string' ? msg.content :
+                        Array.isArray(msg.content) ? msg.content.map((item) => item.type === 'text' ? item.text : item).join('') : JSON.stringify(msg.content)
+                }))
+            };
+            const jsonContent = JSON.stringify(exportData, null, 2);
+            // Show save dialog
+            const uri = await vscode.window.showSaveDialog({
+                defaultUri: vscode.Uri.file(`tokamak-chat-${session.title.replace(/[^a-z0-9]/gi, '-')}-${sessionId}.json`),
+                filters: {
+                    'JSON': ['json'],
+                    'All Files': ['*']
+                },
+                saveLabel: 'Export'
+            });
+            if (uri) {
+                await vscode.workspace.fs.writeFile(uri, Buffer.from(jsonContent, 'utf8'));
+                vscode.window.showInformationMessage(`Conversation exported to ${uri.fsPath}`);
+            }
+        }
+        catch (error) {
+            vscode.window.showErrorMessage(`Failed to export session: ${error}`);
         }
     }
     sendCodeToChat(code, filePath, languageId) {
@@ -725,25 +810,88 @@ export function helper() {
     }
     parseFileOperations(response) {
         const operations = [];
-        // 태그 매칭 시 앞뒤 공백이나 대소문자에 더 유연하게 대응
-        const regex = /<<<FILE_OPERATION>>>([\s\S]*?)(?:<<<END_OPERATION>>>|$)/gi;
+        // 개선된 파싱: FILE_OPERATION 블록을 더 정확하게 찾기
+        // END_OPERATION 태그를 명시적으로 찾되, 없으면 다음 FILE_OPERATION 전까지 또는 문자열 끝까지
+        const fileOpStartPattern = /<<<FILE_OPERATION>>>/gi;
+        const fileOpEndPattern = /<<<END_OPERATION>>>/gi;
+        let startMatch;
+        // 모든 FILE_OPERATION 시작 위치를 먼저 찾기 (lastIndex 문제 방지)
+        const startPositions = [];
+        const startRegex = /<<<FILE_OPERATION>>>/gi;
         let match;
-        while ((match = regex.exec(response)) !== null) {
-            const block = match[1];
-            const typeMatch = block.match(/TYPE:\s*(create|edit|delete|read)/i);
-            const pathMatch = block.match(/PATH:\s*[`'"]?([^`'"\n\r]+)[`'"]?/i);
-            const descMatch = block.match(/DESCRIPTION:\s*(.+)/i);
-            // CONTENT 파싱 강화: 백틱 유무와 상관없이 추출 시도
-            let content;
-            const contentWithBackticks = block.match(/CONTENT:\s*```[\w]*\n?([\s\S]*?)(?:```|$)/i);
-            if (contentWithBackticks) {
-                content = contentWithBackticks[1];
+        while ((match = startRegex.exec(response)) !== null) {
+            startPositions.push(match.index);
+        }
+        // 각 시작 위치에서 블록 파싱
+        for (let i = 0; i < startPositions.length; i++) {
+            const blockStart = startPositions[i] + '<<<FILE_OPERATION>>>'.length;
+            // 다음 FILE_OPERATION 위치 찾기
+            const nextStartPos = i < startPositions.length - 1 ? startPositions[i + 1] : response.length;
+            // END_OPERATION 태그 찾기 (blockStart부터 nextStartPos 전까지)
+            const searchEnd = Math.min(nextStartPos, response.length);
+            const searchText = response.substring(blockStart, searchEnd);
+            const endRegex = /<<<END_OPERATION>>>/gi;
+            const endMatch = endRegex.exec(searchText);
+            let blockEnd;
+            if (endMatch) {
+                // END_OPERATION 태그가 있으면 그 전까지 (blockStart 기준으로 인덱스 조정)
+                blockEnd = blockStart + endMatch.index;
             }
             else {
-                // 백틱이 없는 경우 CONTENT: 다음부터 블록 끝까지(또는 다음 필드 전까지)를 내용으로 간주
-                const plainContentMatch = block.match(/CONTENT:\s*([\s\S]+)$/i);
-                if (plainContentMatch) {
-                    content = plainContentMatch[1].trim();
+                // END_OPERATION이 없으면 다음 FILE_OPERATION 전까지 또는 문자열 끝까지
+                blockEnd = nextStartPos;
+            }
+            const block = response.substring(blockStart, blockEnd);
+            const typeMatch = block.match(/TYPE:\s*(create|edit|delete|read)/i);
+            const pathMatch = block.match(/PATH:\s*[`'"]?([^`'"\n\r]+)[`'"]?/i);
+            const descMatch = block.match(/DESCRIPTION:\s*(.+?)(?:\nCONTENT:|$)/is);
+            // CONTENT 파싱 개선: 백틱 코드 블록을 더 정확하게 처리
+            let content;
+            // CONTENT: 다음 부분 찾기
+            const contentStartMatch = block.match(/CONTENT:\s*/i);
+            if (contentStartMatch) {
+                const contentStart = contentStartMatch.index + contentStartMatch[0].length;
+                let contentText = block.substring(contentStart).trim();
+                // 백틱 코드 블록이 있는지 확인 (```로 시작)
+                if (contentText.startsWith('```')) {
+                    // 언어 지정 부분 건너뛰기 (예: ```markdown, ```typescript 등)
+                    const firstNewline = contentText.indexOf('\n');
+                    if (firstNewline > 0) {
+                        contentText = contentText.substring(firstNewline + 1);
+                    }
+                    else {
+                        // 줄바꿈이 없으면 ```만 제거
+                        contentText = contentText.substring(3).trim();
+                    }
+                    // 닫는 백틱 찾기: 뒤에서부터 검색하여 마지막 ``` 찾기
+                    // 이렇게 하면 코드 블록 내부에 ```가 있어도 정확하게 처리됨
+                    let lastBacktickIndex = -1;
+                    // 뒤에서부터 검색 (마지막 닫는 백틱 찾기)
+                    for (let i = contentText.length - 3; i >= 0; i--) {
+                        if (contentText.substring(i, i + 3) === '```') {
+                            // 이전 문자가 줄바꿈이거나 시작인지 확인 (진짜 닫는 백틱인지)
+                            const beforeChar = i > 0 ? contentText[i - 1] : '\n';
+                            if (beforeChar === '\n' || i === 0) {
+                                lastBacktickIndex = i;
+                                break;
+                            }
+                        }
+                    }
+                    if (lastBacktickIndex >= 0) {
+                        // 닫는 백틱 전까지의 내용 추출
+                        content = contentText.substring(0, lastBacktickIndex).trim();
+                    }
+                    else {
+                        // 닫는 백틱이 없으면 끝까지 (스트리밍 중이거나 누락된 경우)
+                        // 이 경우 전체 내용을 포함하여 파일이 잘리지 않도록 함
+                        content = contentText.trim();
+                        console.warn(`[parseFileOperations] No closing backticks found for ${pathMatch?.[1]}, using full content`);
+                    }
+                }
+                else {
+                    // 백틱이 없으면 CONTENT: 다음부터 블록 끝까지 전체 내용
+                    // 이렇게 하면 마크다운 파일의 모든 내용이 포함됨
+                    content = contentText.trim();
                 }
             }
             if (typeMatch && pathMatch) {
@@ -832,7 +980,39 @@ export function helper() {
         const success = await vscode.workspace.applyEdit(edit);
         if (success) {
             if (successCount > 0) {
-                vscode.window.showInformationMessage(`Successfully applied ${successCount} file operation(s).`);
+                // 수정된 파일들을 명시적으로 저장
+                const modifiedFiles = [];
+                for (const op of this.pendingOperations) {
+                    if (op.type === 'create' || op.type === 'edit') {
+                        const fileUri = vscode.Uri.joinPath(workspaceFolder.uri, op.path);
+                        modifiedFiles.push(fileUri);
+                    }
+                }
+                // 각 파일을 저장 (이미 열려있거나 새로 생성된 파일)
+                for (const fileUri of modifiedFiles) {
+                    try {
+                        // 파일이 이미 열려있으면 저장, 없으면 열어서 저장
+                        const doc = await vscode.workspace.openTextDocument(fileUri);
+                        // WorkspaceEdit 후 명시적으로 저장
+                        await doc.save();
+                    }
+                    catch (error) {
+                        // 파일이 저장할 수 없는 경우 FileSystem API로 직접 저장
+                        try {
+                            const op = this.pendingOperations.find(p => {
+                                const opUri = vscode.Uri.joinPath(workspaceFolder.uri, p.path);
+                                return opUri.toString() === fileUri.toString();
+                            });
+                            if (op && op.content !== undefined) {
+                                await vscode.workspace.fs.writeFile(fileUri, Buffer.from(op.content, 'utf8'));
+                            }
+                        }
+                        catch (fsError) {
+                            console.error(`Failed to save ${fileUri.fsPath}:`, fsError);
+                        }
+                    }
+                }
+                vscode.window.showInformationMessage(`Successfully applied and saved ${successCount} file operation(s).`);
             }
         }
         else {
@@ -846,6 +1026,140 @@ export function helper() {
         }
         this.pendingOperations = [];
         this.panel.webview.postMessage({ command: 'operationsCleared' });
+    }
+    async getCheckpoints() {
+        if (!this.agentEngine) {
+            console.log('[ChatPanel] getCheckpoints: agentEngine not available');
+            this.panel.webview.postMessage({
+                command: 'checkpointsList',
+                checkpoints: []
+            });
+            return;
+        }
+        const checkpointManager = this.agentEngine.getCheckpointManager();
+        if (!checkpointManager) {
+            console.log('[ChatPanel] getCheckpoints: checkpointManager not available');
+            this.panel.webview.postMessage({
+                command: 'checkpointsList',
+                checkpoints: []
+            });
+            return;
+        }
+        const checkpoints = checkpointManager.getCheckpoints();
+        console.log(`[ChatPanel] getCheckpoints: found ${checkpoints.length} checkpoints`);
+        this.panel.webview.postMessage({
+            command: 'checkpointsList',
+            checkpoints: checkpoints.map(cp => ({
+                id: cp.id,
+                timestamp: cp.timestamp,
+                stepDescription: cp.stepDescription,
+                stepId: cp.stepId,
+                fileCount: cp.workspaceSnapshot.files.length,
+            }))
+        });
+    }
+    async compareCheckpoint(checkpointId) {
+        if (!this.agentEngine) {
+            return;
+        }
+        const checkpointManager = this.agentEngine.getCheckpointManager();
+        if (!checkpointManager) {
+            vscode.window.showErrorMessage('Checkpoint manager not available');
+            return;
+        }
+        try {
+            const diffs = await checkpointManager.compareWithCurrent(checkpointId);
+            if (diffs.length === 0) {
+                vscode.window.showInformationMessage('No differences found between checkpoint and current workspace.');
+                return;
+            }
+            // Diff 뷰 표시
+            const checkpoint = checkpointManager.getCheckpoints().find(cp => cp.id === checkpointId);
+            if (!checkpoint) {
+                return;
+            }
+            // 첫 번째 변경된 파일의 diff 표시
+            const firstDiff = diffs[0];
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                return;
+            }
+            const currentUri = vscode.Uri.joinPath(workspaceFolder.uri, firstDiff.path);
+            const snapshotUri = vscode.Uri.parse(`tokamak-checkpoint:${checkpointId}/${firstDiff.path}`);
+            // TextDocumentContentProvider로 스냅샷 내용 제공
+            const provider = new (class {
+                provideTextDocumentContent(uri) {
+                    const [, cpId, ...pathParts] = uri.path.split('/');
+                    const filePath = pathParts.join('/');
+                    const cp = checkpointManager.getCheckpoints().find(c => c.id === cpId);
+                    const fileSnapshot = cp?.workspaceSnapshot.files.find(f => f.path === filePath);
+                    return fileSnapshot?.content || '';
+                }
+            })();
+            const disposable = vscode.workspace.registerTextDocumentContentProvider('tokamak-checkpoint', provider);
+            await vscode.commands.executeCommand('vscode.diff', snapshotUri, currentUri, `[CHECKPOINT] ${firstDiff.path}`);
+            setTimeout(() => disposable.dispose(), 10000);
+            if (diffs.length > 1) {
+                vscode.window.showInformationMessage(`${diffs.length} files changed. Showing first file. Use checkpoint panel to view others.`);
+            }
+        }
+        catch (error) {
+            vscode.window.showErrorMessage(`Failed to compare checkpoint: ${error}`);
+        }
+    }
+    async restoreCheckpoint(checkpointId, workspaceOnly) {
+        if (!this.agentEngine) {
+            return;
+        }
+        const checkpointManager = this.agentEngine.getCheckpointManager();
+        if (!checkpointManager) {
+            vscode.window.showErrorMessage('Checkpoint manager not available');
+            return;
+        }
+        try {
+            const checkpoint = checkpointManager.getCheckpoints().find(cp => cp.id === checkpointId);
+            if (!checkpoint) {
+                vscode.window.showErrorMessage('Checkpoint not found');
+                return;
+            }
+            const confirmed = await vscode.window.showWarningMessage(`Are you sure you want to restore checkpoint "${checkpoint.stepDescription || checkpointId}"? ` +
+                `This will ${workspaceOnly ? 'restore workspace files only' : 'restore workspace and task state'}.`, { modal: true }, 'Yes', 'Cancel');
+            if (confirmed === 'Yes') {
+                await checkpointManager.restoreCheckpoint(checkpointId, workspaceOnly);
+                if (!workspaceOnly && checkpoint.planSnapshot) {
+                    // Plan도 복원
+                    this.agentEngine.setPlanFromResponse(JSON.stringify(checkpoint.planSnapshot));
+                }
+                vscode.window.showInformationMessage('Checkpoint restored successfully');
+                // 체크포인트 목록 새로고침
+                await this.getCheckpoints();
+            }
+        }
+        catch (error) {
+            vscode.window.showErrorMessage(`Failed to restore checkpoint: ${error}`);
+        }
+    }
+    async deleteCheckpoint(checkpointId) {
+        if (!this.agentEngine) {
+            return;
+        }
+        const checkpointManager = this.agentEngine.getCheckpointManager();
+        if (!checkpointManager) {
+            vscode.window.showErrorMessage('Checkpoint manager not available');
+            return;
+        }
+        try {
+            const confirmed = await vscode.window.showWarningMessage('Are you sure you want to delete this checkpoint?', { modal: true }, 'Yes', 'Cancel');
+            if (confirmed === 'Yes') {
+                await checkpointManager.deleteCheckpoint(checkpointId);
+                vscode.window.showInformationMessage('Checkpoint deleted');
+                // 체크포인트 목록 새로고침
+                await this.getCheckpoints();
+            }
+        }
+        catch (error) {
+            vscode.window.showErrorMessage(`Failed to delete checkpoint: ${error}`);
+        }
     }
     async previewFileOperation(index) {
         const operation = this.pendingOperations[index];
@@ -1044,6 +1358,78 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
                 }
                 // In agent or ask mode, parse file operations
                 const operations = this.parseFileOperations(fullResponse);
+                // Agent 모드인 경우 처리
+                if (this.currentMode === 'agent' && this.agentEngine) {
+                    // FILE_OPERATION이 있으면 직접 실행
+                    if (operations.length > 0) {
+                        // 각 FILE_OPERATION을 step으로 변환하고 직접 실행 (checkpoint 생성 포함)
+                        for (let i = 0; i < operations.length; i++) {
+                            const op = operations[i];
+                            // Checkpoint 생성 (step 실행 전) - 설정이 활성화된 경우에만
+                            let checkpointId;
+                            const checkpointManager = this.agentEngine.getCheckpointManager();
+                            if (checkpointManager && (0, settings_js_1.isCheckpointsEnabled)()) {
+                                try {
+                                    const stepDescription = `${op.type.toUpperCase()}: ${op.path}${op.description ? ` - ${op.description}` : ''}`;
+                                    console.log(`[ChatPanel] Creating checkpoint before ${op.type}: ${op.path}`);
+                                    checkpointId = await checkpointManager.createCheckpoint(stepDescription, `step-${i}`, [], // Plan 없음
+                                    {
+                                        state: 'Executing',
+                                        currentStepIndex: i,
+                                    });
+                                    console.log(`[ChatPanel] Checkpoint created: ${checkpointId}`);
+                                    if (checkpointId) {
+                                        // Checkpoint 생성 콜백 호출 (UI 업데이트용)
+                                        this.panel.webview.postMessage({ command: 'checkpointCreated', checkpointId });
+                                    }
+                                }
+                                catch (error) {
+                                    console.error('[ChatPanel] Failed to create checkpoint:', error);
+                                }
+                            }
+                            // 파일 작업 실행
+                            try {
+                                const action = {
+                                    type: op.type === 'create' || op.type === 'edit' ? 'write' : op.type === 'delete' ? 'delete' : 'read',
+                                    payload: op.type === 'delete' || op.type === 'read'
+                                        ? { path: op.path }
+                                        : { path: op.path, content: op.content || '' }
+                                };
+                                const executor = new executor_js_1.Executor();
+                                const result = await executor.execute(action);
+                                console.log(`[ChatPanel] Executed ${op.type}: ${op.path} - ${result}`);
+                                // 성공 메시지 표시
+                                this.panel.webview.postMessage({
+                                    command: 'addMessage',
+                                    role: 'assistant',
+                                    content: `✅ ${op.type === 'create' ? 'Created' : op.type === 'edit' ? 'Updated' : 'Deleted'}: \`${op.path}\``
+                                });
+                            }
+                            catch (error) {
+                                console.error(`[ChatPanel] Failed to execute ${op.type}: ${op.path}`, error);
+                                this.panel.webview.postMessage({
+                                    command: 'addMessage',
+                                    role: 'assistant',
+                                    content: `❌ Failed to ${op.type} \`${op.path}\`: ${error instanceof Error ? error.message : 'Unknown error'}`
+                                });
+                            }
+                        }
+                        // Checkpoints 목록 새로고침
+                        await this.getCheckpoints();
+                        // Agent 모드에서는 파일이 자동으로 생성되므로 Pending Operations로 표시하지 않음
+                        this.pendingOperations = [];
+                        this.panel.webview.postMessage({ command: 'operationsCleared' });
+                    }
+                    else {
+                        // FILE_OPERATION이 없으면 AgentEngine의 자율 루프 시작
+                        // (터미널 명령 실행 등이 필요한 경우)
+                        if (this.agentEngine) {
+                            this.agentEngine.updateContext({ userInput: text, history: this.chatHistory });
+                            await this.agentEngine.transitionTo('Planning');
+                            await this.agentEngine.run();
+                        }
+                    }
+                }
                 // Handle READ operations automatically
                 const readOps = operations.filter(op => op.type === 'read');
                 if (readOps.length > 0) {
@@ -1818,6 +2204,27 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             justify-content: space-between;
             align-items: center;
         }
+        #history-search {
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--vscode-widget-border);
+            background-color: var(--vscode-input-background);
+        }
+        #history-search-input {
+            width: 100%;
+            padding: 6px 10px;
+            border: 1px solid var(--vscode-input-border);
+            background-color: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border-radius: 4px;
+            font-family: inherit;
+            font-size: 0.85em;
+        }
+        #history-search-input:focus {
+            outline: 1px solid var(--vscode-focusBorder);
+        }
+        #history-search-input::placeholder {
+            color: var(--vscode-input-placeholderForeground);
+        }
         #history-list {
             flex: 1;
             overflow-y: auto;
@@ -1851,22 +2258,56 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
         .session-date {
             font-size: 0.75em;
             opacity: 0.6;
+            margin-bottom: 4px;
         }
-        .delete-session {
+        .session-mode {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.7em;
+            font-weight: 600;
+            margin-top: 4px;
+        }
+        .session-mode.ask {
+            background-color: var(--vscode-charts-blue);
+            color: white;
+        }
+        .session-mode.plan {
+            background-color: var(--vscode-charts-yellow);
+            color: black;
+        }
+        .session-mode.agent {
+            background-color: var(--vscode-charts-green);
+            color: white;
+        }
+        .session-actions {
             position: absolute;
             right: 10px;
             top: 50%;
             transform: translateY(-50%);
+            display: flex;
+            gap: 4px;
             opacity: 0;
+            transition: opacity 0.2s;
+        }
+        .session-item:hover .session-actions {
+            opacity: 1;
+        }
+        .delete-session, .export-session {
             cursor: pointer;
             padding: 4px;
+            font-size: 0.9em;
+            opacity: 0.7;
+            transition: opacity 0.2s;
         }
-        .session-item:hover .delete-session {
-            opacity: 0.6;
-        }
-        .session-item .delete-session:hover {
+        .delete-session:hover, .export-session:hover {
             opacity: 1;
+        }
+        .delete-session:hover {
             color: var(--vscode-errorForeground);
+        }
+        .export-session:hover {
+            color: var(--vscode-textLink-foreground);
         }
         #history-overlay {
             display: none;
@@ -1959,6 +2400,84 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
         .step-desc {
             flex: 1;
         }
+
+        /* Checkpoint Panel Styles */
+        #checkpoints-panel {
+            display: none;
+            padding: 12px 15px;
+            background-color: var(--vscode-sideBar-background);
+            border-top: 1px solid var(--vscode-widget-border);
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        #checkpoints-panel.visible {
+            display: block;
+        }
+        .checkpoints-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .checkpoints-header h4 {
+            margin: 0;
+            font-size: 0.9em;
+        }
+        .checkpoint-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 10px;
+            background-color: var(--vscode-editor-background);
+            border-radius: 4px;
+            margin-bottom: 6px;
+            font-size: 0.85em;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .checkpoint-item:hover {
+            background-color: var(--vscode-list-hoverBackground);
+        }
+        .checkpoint-info {
+            flex: 1;
+            min-width: 0;
+        }
+        .checkpoint-description {
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-bottom: 2px;
+        }
+        .checkpoint-meta {
+            font-size: 0.75em;
+            opacity: 0.6;
+        }
+        .checkpoint-actions {
+            display: flex;
+            gap: 4px;
+        }
+        .checkpoint-btn {
+            padding: 4px 8px;
+            border: 1px solid var(--vscode-widget-border);
+            background-color: transparent;
+            color: var(--vscode-foreground);
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 0.75em;
+        }
+        .checkpoint-btn:hover {
+            background-color: var(--vscode-toolbar-hoverBackground);
+        }
+        .checkpoint-btn.compare {
+            color: var(--vscode-textLink-foreground);
+        }
+        .checkpoint-btn.restore {
+            color: var(--vscode-testing-iconPassed);
+        }
+        .checkpoint-btn.delete {
+            color: var(--vscode-errorForeground);
+        }
     </style>
 </head>
 <body>
@@ -1967,6 +2486,9 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
         <div id="history-header">
             <h4>Chat History</h4>
             <button id="close-history" style="background:none; border:none; color:inherit; cursor:pointer; font-size:1.4em;">×</button>
+        </div>
+        <div id="history-search">
+            <input type="text" id="history-search-input" placeholder="Search conversations...">
         </div>
         <div id="history-list"></div>
     </div>
@@ -1995,6 +2517,13 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             <span id="agent-status" class="agent-status-badge">Idle</span>
         </div>
         <div id="plan-list"></div>
+    </div>
+    <div id="checkpoints-panel">
+        <div class="checkpoints-header">
+            <h4>💾 Checkpoints</h4>
+            <button id="refresh-checkpoints" class="checkpoint-btn" title="Refresh checkpoints">🔄</button>
+        </div>
+        <div id="checkpoints-list"></div>
     </div>
     <div id="operations-panel">
         <h4>⚡ Pending File Operations</h4>
@@ -2053,11 +2582,15 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             const historyList = document.getElementById('history-list');
             const historyOverlay = document.getElementById('history-overlay');
             const closeHistoryBtn = document.getElementById('close-history');
+            const historySearchInput = document.getElementById('history-search-input');
             const planPanel = document.getElementById('plan-panel');
             const planList = document.getElementById('plan-list');
             const agentStatusBadge = document.getElementById('agent-status');
             const tokenDisplay = document.getElementById('token-display');
             const tokenDetail = document.getElementById('token-detail');
+            const checkpointsPanel = document.getElementById('checkpoints-panel');
+            const checkpointsList = document.getElementById('checkpoints-list');
+            const refreshCheckpointsBtn = document.getElementById('refresh-checkpoints');
 
             let currentStreamingMessage = null;
             let streamingContent = '';
@@ -2121,7 +2654,8 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             const langLabel = lang || 'code';
             const isShell = ['bash', 'shell', 'sh', 'zsh', 'powershell', 'cmd', 'python', 'python3'].includes(lang.toLowerCase());
             const runBtn = isShell ?\`<button class="run-btn" onclick="runCommand(this)">▶ Run</button>\` : '';
-            return \`<div class="code-header"><span>\${langLabel}</span><div><button class="insert-btn" onclick="insertCode(this)">Insert</button>\${runBtn}</div></div><pre><code class="language-\${lang}">\${escapedCode}</code></pre>\`;
+            // Insert 버튼 제거: Agent 모드에서는 FILE_OPERATION으로 처리되고, 일반 채팅에서도 불필요
+            return \`<div class="code-header"><span>\${langLabel}</span><div>\${runBtn}</div></div><pre><code class="language-\${lang}">\${escapedCode}</code></pre>\`;
             });
             result = result.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
             result = result.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
@@ -2249,11 +2783,7 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             stopBtn.classList.remove('visible');
             }
 
-            function insertCode(btn) {
-            const pre = btn.closest('.code-header').nextElementSibling;
-            const code = pre.querySelector('code').textContent;
-            vscode.postMessage({ command: 'insertCode', code: code });
-            }
+            // insertCode 함수 제거됨 - Insert 버튼이 더 이상 표시되지 않음
 
             function runCommand(btn) {
             const pre = btn.closest('.code-header').nextElementSibling;
@@ -2471,31 +3001,78 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             const closeHistory = () => {
             historyPanel.classList.remove('visible');
             historyOverlay.classList.remove('visible');
+            if (historySearchInput) {
+            historySearchInput.value = '';
+            }
             };
 
             closeHistoryBtn.addEventListener('click', closeHistory);
             historyOverlay.addEventListener('click', closeHistory);
 
+            if (historySearchInput) {
+            historySearchInput.addEventListener('input', () => {
+            filterSessions();
+            });
+            }
+
+            let allSessions = [];
+            let currentSessionId = null;
+
             function renderSessions(sessions, currentId) {
-            historyList.innerHTML = sessions.map(s => {
+            allSessions = sessions;
+            currentSessionId = currentId;
+            filterSessions();
+            }
+
+            function filterSessions() {
+            const searchInput = document.getElementById('history-search-input');
+            const query = searchInput ? searchInput.value.toLowerCase().trim() : '';
+            
+            const filtered = query ? allSessions.filter(s => {
+            const title = (s.title || 'New Conversation').toLowerCase();
+            const date = new Date(s.timestamp).toLocaleString().toLowerCase();
+            return title.includes(query) || date.includes(query);
+            }) : allSessions;
+
+            historyList.innerHTML = filtered.map(s => {
             const date = new Date(s.timestamp).toLocaleString();
-            const activeClass = s.id === currentId ? 'active' : '';
+            const activeClass = s.id === currentSessionId ? 'active' : '';
             const title = s.title || 'New Conversation';
+            const mode = s.mode || 'ask';
+            const modeLabel = mode === 'ask' ? 'ASK' : mode === 'plan' ? 'PLAN' : 'AGENT';
             return '<div class="session-item ' + activeClass + '" data-id="' + s.id + '">' +
-            '<div class="session-title">' + title + '</div>' +
-            '<div class="session-date">' + date + '</div>' +
-            '<span class="delete-session" data-id="' + s.id + '">🗑️</span>' +
+            '<div class="session-title">' + escapeHtml(title) + '</div>' +
+            '<div class="session-date">' + escapeHtml(date) + '</div>' +
+            '<span class="session-mode ' + mode + '">' + modeLabel + '</span>' +
+            '<div class="session-actions">' +
+            '<span class="export-session" data-id="' + s.id + '" title="Export conversation">📥</span>' +
+            '<span class="delete-session" data-id="' + s.id + '" title="Delete conversation">🗑️</span>' +
+            '</div>' +
             '</div>';
             }).join('');
 
             historyList.querySelectorAll('.session-item').forEach(item => {
             item.addEventListener('click', (e) => {
-            if (e.target.classList.contains('delete-session')) {
-            vscode.postMessage({ command: 'deleteSession', sessionId: e.target.dataset.id });
+            if (e.target.classList.contains('delete-session') || e.target.classList.contains('export-session')) {
+            return; // Handled by separate click handlers
             } else {
             vscode.postMessage({ command: 'loadSession', sessionId: item.dataset.id });
             closeHistory();
             }
+            });
+            });
+
+            historyList.querySelectorAll('.delete-session').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            vscode.postMessage({ command: 'deleteSession', sessionId: btn.dataset.id });
+            });
+            });
+
+            historyList.querySelectorAll('.export-session').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            vscode.postMessage({ command: 'exportSession', sessionId: btn.dataset.id });
             });
             });
             }
@@ -2509,6 +3086,9 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             modeDescription.textContent = modeDescriptions[currentMode];
             messageInput.placeholder = modePlaceholders[currentMode];
             vscode.postMessage({ command: 'selectMode', mode: currentMode });
+            
+            // Agent 모드이고 checkpoint 기능이 활성화된 경우에만 체크포인트 로드 및 패널 표시
+            // (설정은 서버에서 확인되므로 여기서는 일단 표시하지 않음, modeChanged 이벤트에서 처리됨)
             });
             });
 
@@ -2655,6 +3235,15 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             });
             modeDescription.textContent = modeDescriptions[currentMode];
             messageInput.placeholder = modePlaceholders[currentMode];
+            
+            // Agent 모드이고 checkpoint 기능이 활성화된 경우에만 체크포인트 패널 표시 및 로드
+            const checkpointsEnabled = message.checkpointsEnabled !== undefined ? message.checkpointsEnabled : false;
+            if (currentMode === 'agent' && checkpointsEnabled) {
+            checkpointsPanel.classList.add('visible');
+            vscode.postMessage({ command: 'getCheckpoints' });
+            } else {
+            checkpointsPanel.classList.remove('visible');
+            }
             break;
             case 'showOperations':
             showOperations(message.operations);
@@ -2688,6 +3277,13 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             case 'agentStateChanged':
             updateAgentStatusUI(message.state);
             break;
+            case 'checkpointCreated':
+            // 체크포인트가 생성되면 목록 새로고침
+            vscode.postMessage({ command: 'getCheckpoints' });
+            break;
+            case 'checkpointsList':
+            updateCheckpointsUI(message.checkpoints);
+            break;
             case 'generationStopped':
             endStreaming();
             break;
@@ -2700,6 +3296,63 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             planPanel.classList.add('visible');
             }
             }
+
+            function updateCheckpointsUI(checkpoints) {
+            // Agent 모드이고 checkpoint가 활성화된 경우에만 checkpoints가 없어도 패널 표시
+            if (!checkpoints || checkpoints.length === 0) {
+            checkpointsList.innerHTML = '<div style="opacity:0.6; font-size:0.85em; padding:8px;">No checkpoints yet. Checkpoints will be created automatically before each step execution.</div>';
+            // 패널 표시는 modeChanged 이벤트에서 처리됨
+            return;
+            }
+
+            checkpointsPanel.classList.add('visible');
+            checkpointsList.innerHTML = checkpoints.map(cp => {
+            const date = new Date(cp.timestamp).toLocaleString();
+            const desc = cp.stepDescription || 'Checkpoint';
+            return '<div class="checkpoint-item" data-id="' + cp.id + '">' +
+            '<div class="checkpoint-info">' +
+            '<div class="checkpoint-description">' + escapeHtml(desc) + '</div>' +
+            '<div class="checkpoint-meta">' + date + ' • ' + cp.fileCount + ' files</div>' +
+            '</div>' +
+            '<div class="checkpoint-actions">' +
+            '<button class="checkpoint-btn compare" data-id="' + cp.id + '" title="Compare with current">Compare</button>' +
+            '<button class="checkpoint-btn restore" data-id="' + cp.id + '" title="Restore workspace">Restore</button>' +
+            '<button class="checkpoint-btn delete" data-id="' + cp.id + '" title="Delete checkpoint">×</button>' +
+            '</div>' +
+            '</div>';
+            }).join('');
+
+            // 이벤트 리스너 추가
+            checkpointsList.querySelectorAll('.checkpoint-btn.compare').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            vscode.postMessage({ command: 'compareCheckpoint', checkpointId: btn.dataset.id });
+            });
+            });
+
+            checkpointsList.querySelectorAll('.checkpoint-btn.restore').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            vscode.postMessage({ command: 'restoreCheckpoint', checkpointId: btn.dataset.id, restoreWorkspaceOnly: false });
+            });
+            });
+
+            checkpointsList.querySelectorAll('.checkpoint-btn.delete').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            vscode.postMessage({ command: 'deleteCheckpoint', checkpointId: btn.dataset.id });
+            });
+            });
+            }
+
+            if (refreshCheckpointsBtn) {
+            refreshCheckpointsBtn.addEventListener('click', () => {
+            vscode.postMessage({ command: 'getCheckpoints' });
+            });
+            }
+
+            // Agent 모드이고 checkpoint가 활성화된 경우에만 체크포인트 목록 로드
+            // (설정은 서버에서 확인되므로 여기서는 로드하지 않음, modeChanged 이벤트에서 처리됨)
 
             function updatePlanUI(plan) {
             if (!plan || plan.length === 0) {
@@ -2788,7 +3441,6 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             e.preventDefault();
             });
 
-            window.insertCode = insertCode;
             window.runCommand = runCommand;
             }) ();
 

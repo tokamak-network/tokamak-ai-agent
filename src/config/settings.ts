@@ -7,10 +7,15 @@ export interface TokamakSettings {
     selectedModel: string;
     enableInlineCompletion: boolean;
     completionDebounceMs: number;
+    enableCheckpoints: boolean;
 }
 
 export function setSettingsContext(context: vscode.ExtensionContext): void {
     // Keep for potential future use or consistency
+}
+
+export function isCheckpointsEnabled(): boolean {
+    return getSettings().enableCheckpoints;
 }
 
 export function getSettings(): TokamakSettings {
@@ -22,6 +27,7 @@ export function getSettings(): TokamakSettings {
         selectedModel: config.get<string>('selectedModel', 'qwen3-coder-pro'),
         enableInlineCompletion: config.get<boolean>('enableInlineCompletion', true),
         completionDebounceMs: config.get<number>('completionDebounceMs', 300),
+        enableCheckpoints: config.get<boolean>('enableCheckpoints', false),
     };
 }
 

@@ -34,6 +34,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.setSettingsContext = setSettingsContext;
+exports.isCheckpointsEnabled = isCheckpointsEnabled;
 exports.getSettings = getSettings;
 exports.getSelectedModel = getSelectedModel;
 exports.getAvailableModels = getAvailableModels;
@@ -44,6 +45,9 @@ const vscode = __importStar(require("vscode"));
 function setSettingsContext(context) {
     // Keep for potential future use or consistency
 }
+function isCheckpointsEnabled() {
+    return getSettings().enableCheckpoints;
+}
 function getSettings() {
     const config = vscode.workspace.getConfiguration('tokamak');
     return {
@@ -53,6 +57,7 @@ function getSettings() {
         selectedModel: config.get('selectedModel', 'qwen3-coder-pro'),
         enableInlineCompletion: config.get('enableInlineCompletion', true),
         completionDebounceMs: config.get('completionDebounceMs', 300),
+        enableCheckpoints: config.get('enableCheckpoints', false),
     };
 }
 function getSelectedModel() {

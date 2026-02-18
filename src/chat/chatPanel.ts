@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
 import { streamChatCompletion, ChatMessage } from '../api/client.js';
-import { isConfigured, promptForConfiguration, getAvailableModels, getSelectedModel, setSelectedModel } from '../config/settings.js';
+import { isConfigured, promptForConfiguration, getAvailableModels, getSelectedModel, setSelectedModel, isCheckpointsEnabled } from '../config/settings.js';
 import { AgentEngine } from '../agent/engine.js';
 import { AgentContext } from '../agent/types.js';
+import { Executor } from '../agent/executor.js';
 
 type ChatMode = 'ask' | 'plan' | 'agent';
 
@@ -131,8 +132,19 @@ export class ChatPanel {
             onPlanChange: (plan) => {
                 this.panel.webview.postMessage({ command: 'updatePlan', plan });
             },
+            onMessage: (role, content) => {
+                // Agent 실행 중 메시지 표시 (터미널 실행 결과 등)
+                this.panel.webview.postMessage({
+                    command: 'addMessage',
+                    role: role,
+                    content: content
+                });
+            },
             onCheckpointCreated: (checkpointId) => {
+                console.log(`[ChatPanel] Checkpoint created callback: ${checkpointId}`);
                 this.panel.webview.postMessage({ command: 'checkpointCreated', checkpointId });
+                // 즉시 checkpoints 목록 새로고침
+                this.getCheckpoints();
             }
         };
         this.agentEngine = new AgentEngine(context);
@@ -152,14 +164,22 @@ export class ChatPanel {
             case 'selectMode':
                 this.currentMode = message.mode;
                 this.saveChatHistory();
-                this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
+                this.panel.webview.postMessage({ 
+                    command: 'modeChanged', 
+                    mode: this.currentMode,
+                    checkpointsEnabled: isCheckpointsEnabled()
+                });
                 break;
             case 'ready':
                 this.updateModelList();
-                this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
+                this.panel.webview.postMessage({ 
+                    command: 'modeChanged', 
+                    mode: this.currentMode,
+                    checkpointsEnabled: isCheckpointsEnabled()
+                });
                 this.sendRestoredHistory();
-                // Agent 모드일 때 체크포인트 로드
-                if (this.currentMode === 'agent') {
+                // Agent 모드이고 checkpoint가 활성화된 경우에만 체크포인트 로드
+                if (this.currentMode === 'agent' && isCheckpointsEnabled()) {
                     await this.getCheckpoints();
                 }
                 break;
@@ -178,7 +198,11 @@ export class ChatPanel {
                     this.chatHistory = session.messages;
                     this.currentMode = session.mode;
                     this.panel.webview.postMessage({ command: 'clearMessages' });
-                    this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
+                    this.panel.webview.postMessage({ 
+                        command: 'modeChanged', 
+                        mode: this.currentMode,
+                        checkpointsEnabled: isCheckpointsEnabled()
+                    });
                     this.sendRestoredHistory();
                 }
                 break;
@@ -868,32 +892,39 @@ export function helper() {
         
         // 개선된 파싱: FILE_OPERATION 블록을 더 정확하게 찾기
         // END_OPERATION 태그를 명시적으로 찾되, 없으면 다음 FILE_OPERATION 전까지 또는 문자열 끝까지
-        const fileOpStart = /<<<FILE_OPERATION>>>/gi;
-        const fileOpEnd = /<<<END_OPERATION>>>/gi;
+        const fileOpStartPattern = /<<<FILE_OPERATION>>>/gi;
+        const fileOpEndPattern = /<<<END_OPERATION>>>/gi;
         
-        let lastIndex = 0;
         let startMatch: RegExpExecArray | null;
         
-        while ((startMatch = fileOpStart.exec(response)) !== null) {
-            const blockStart = startMatch.index + startMatch[0].length;
+        // 모든 FILE_OPERATION 시작 위치를 먼저 찾기 (lastIndex 문제 방지)
+        const startPositions: number[] = [];
+        const startRegex = /<<<FILE_OPERATION>>>/gi;
+        let match;
+        while ((match = startRegex.exec(response)) !== null) {
+            startPositions.push(match.index);
+        }
+        
+            // 각 시작 위치에서 블록 파싱
+        for (let i = 0; i < startPositions.length; i++) {
+            const blockStart = startPositions[i] + '<<<FILE_OPERATION>>>'.length;
             
-            // 다음 FILE_OPERATION 또는 END_OPERATION 찾기
-            fileOpEnd.lastIndex = blockStart;
-            const endMatch = fileOpEnd.exec(response);
+            // 다음 FILE_OPERATION 위치 찾기
+            const nextStartPos = i < startPositions.length - 1 ? startPositions[i + 1] : response.length;
             
-            fileOpStart.lastIndex = blockStart;
-            const nextStartMatch = fileOpStart.exec(response);
+            // END_OPERATION 태그 찾기 (blockStart부터 nextStartPos 전까지)
+            const searchEnd = Math.min(nextStartPos, response.length);
+            const searchText = response.substring(blockStart, searchEnd);
+            const endRegex = /<<<END_OPERATION>>>/gi;
+            const endMatch = endRegex.exec(searchText);
             
             let blockEnd: number;
             if (endMatch) {
-                // END_OPERATION 태그가 있으면 그 전까지
-                blockEnd = endMatch.index;
-            } else if (nextStartMatch) {
-                // 다음 FILE_OPERATION이 있으면 그 전까지
-                blockEnd = nextStartMatch.index;
+                // END_OPERATION 태그가 있으면 그 전까지 (blockStart 기준으로 인덱스 조정)
+                blockEnd = blockStart + endMatch.index;
             } else {
-                // 둘 다 없으면 문자열 끝까지
-                blockEnd = response.length;
+                // END_OPERATION이 없으면 다음 FILE_OPERATION 전까지 또는 문자열 끝까지
+                blockEnd = nextStartPos;
             }
             
             const block = response.substring(blockStart, blockEnd);
@@ -1044,8 +1075,8 @@ export function helper() {
             }
         }
 
-        // 일괄 실행 및 자동 저장
-        const success = await vscode.workspace.applyEdit(edit, { save: true });
+        // 일괄 실행
+        const success = await vscode.workspace.applyEdit(edit);
 
         if (success) {
             if (successCount > 0) {
@@ -1061,11 +1092,23 @@ export function helper() {
                 // 각 파일을 저장 (이미 열려있거나 새로 생성된 파일)
                 for (const fileUri of modifiedFiles) {
                     try {
+                        // 파일이 이미 열려있으면 저장, 없으면 열어서 저장
                         const doc = await vscode.workspace.openTextDocument(fileUri);
+                        // WorkspaceEdit 후 명시적으로 저장
                         await doc.save();
                     } catch (error) {
-                        // 파일이 아직 열리지 않았거나 저장할 수 없는 경우는 무시
-                        // WorkspaceEdit의 save 옵션이 처리함
+                        // 파일이 저장할 수 없는 경우 FileSystem API로 직접 저장
+                        try {
+                            const op = this.pendingOperations.find(p => {
+                                const opUri = vscode.Uri.joinPath(workspaceFolder.uri, p.path);
+                                return opUri.toString() === fileUri.toString();
+                            });
+                            if (op && op.content !== undefined) {
+                                await vscode.workspace.fs.writeFile(fileUri, Buffer.from(op.content, 'utf8'));
+                            }
+                        } catch (fsError) {
+                            console.error(`Failed to save ${fileUri.fsPath}:`, fsError);
+                        }
                     }
                 }
 
@@ -1086,11 +1129,17 @@ export function helper() {
 
     private async getCheckpoints(): Promise<void> {
         if (!this.agentEngine) {
+            console.log('[ChatPanel] getCheckpoints: agentEngine not available');
+            this.panel.webview.postMessage({
+                command: 'checkpointsList',
+                checkpoints: []
+            });
             return;
         }
 
         const checkpointManager = this.agentEngine.getCheckpointManager();
         if (!checkpointManager) {
+            console.log('[ChatPanel] getCheckpoints: checkpointManager not available');
             this.panel.webview.postMessage({
                 command: 'checkpointsList',
                 checkpoints: []
@@ -1099,6 +1148,7 @@ export function helper() {
         }
 
         const checkpoints = checkpointManager.getCheckpoints();
+        console.log(`[ChatPanel] getCheckpoints: found ${checkpoints.length} checkpoints`);
         this.panel.webview.postMessage({
             command: 'checkpointsList',
             checkpoints: checkpoints.map(cp => ({
@@ -1470,6 +1520,86 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
 
                 // In agent or ask mode, parse file operations
                 const operations = this.parseFileOperations(fullResponse);
+                
+                // Agent 모드인 경우 처리
+                if (this.currentMode === 'agent' && this.agentEngine) {
+                    // FILE_OPERATION이 있으면 직접 실행
+                    if (operations.length > 0) {
+                    // 각 FILE_OPERATION을 step으로 변환하고 직접 실행 (checkpoint 생성 포함)
+                    for (let i = 0; i < operations.length; i++) {
+                        const op = operations[i];
+                        
+                        // Checkpoint 생성 (step 실행 전) - 설정이 활성화된 경우에만
+                        let checkpointId: string | undefined;
+                        const checkpointManager = this.agentEngine.getCheckpointManager();
+                        if (checkpointManager && isCheckpointsEnabled()) {
+                            try {
+                                const stepDescription = `${op.type.toUpperCase()}: ${op.path}${op.description ? ` - ${op.description}` : ''}`;
+                                console.log(`[ChatPanel] Creating checkpoint before ${op.type}: ${op.path}`);
+                                checkpointId = await checkpointManager.createCheckpoint(
+                                    stepDescription,
+                                    `step-${i}`,
+                                    [], // Plan 없음
+                                    {
+                                        state: 'Executing',
+                                        currentStepIndex: i,
+                                    }
+                                );
+                                console.log(`[ChatPanel] Checkpoint created: ${checkpointId}`);
+                                if (checkpointId) {
+                                    // Checkpoint 생성 콜백 호출 (UI 업데이트용)
+                                    this.panel.webview.postMessage({ command: 'checkpointCreated', checkpointId });
+                                }
+                            } catch (error) {
+                                console.error('[ChatPanel] Failed to create checkpoint:', error);
+                            }
+                        }
+                        
+                        // 파일 작업 실행
+                        try {
+                            const action: any = {
+                                type: op.type === 'create' || op.type === 'edit' ? 'write' : op.type === 'delete' ? 'delete' : 'read',
+                                payload: op.type === 'delete' || op.type === 'read' 
+                                    ? { path: op.path }
+                                    : { path: op.path, content: op.content || '' }
+                            };
+                            
+                            const executor = new Executor();
+                            const result = await executor.execute(action);
+                            console.log(`[ChatPanel] Executed ${op.type}: ${op.path} - ${result}`);
+                            
+                            // 성공 메시지 표시
+                            this.panel.webview.postMessage({
+                                command: 'addMessage',
+                                role: 'assistant',
+                                content: `✅ ${op.type === 'create' ? 'Created' : op.type === 'edit' ? 'Updated' : 'Deleted'}: \`${op.path}\``
+                            });
+                        } catch (error) {
+                            console.error(`[ChatPanel] Failed to execute ${op.type}: ${op.path}`, error);
+                            this.panel.webview.postMessage({
+                                command: 'addMessage',
+                                role: 'assistant',
+                                content: `❌ Failed to ${op.type} \`${op.path}\`: ${error instanceof Error ? error.message : 'Unknown error'}`
+                            });
+                        }
+                    }
+                    
+                    // Checkpoints 목록 새로고침
+                    await this.getCheckpoints();
+                    
+                    // Agent 모드에서는 파일이 자동으로 생성되므로 Pending Operations로 표시하지 않음
+                    this.pendingOperations = [];
+                    this.panel.webview.postMessage({ command: 'operationsCleared' });
+                    } else {
+                        // FILE_OPERATION이 없으면 AgentEngine의 자율 루프 시작
+                        // (터미널 명령 실행 등이 필요한 경우)
+                        if (this.agentEngine) {
+                            this.agentEngine.updateContext({ userInput: text, history: this.chatHistory });
+                            await this.agentEngine.transitionTo('Planning');
+                            await this.agentEngine.run();
+                        }
+                    }
+                }
 
                 // Handle READ operations automatically
                 const readOps = operations.filter(op => op.type === 'read');
@@ -2722,7 +2852,8 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             const langLabel = lang || 'code';
             const isShell = ['bash', 'shell', 'sh', 'zsh', 'powershell', 'cmd', 'python', 'python3'].includes(lang.toLowerCase());
             const runBtn = isShell ?\`<button class="run-btn" onclick="runCommand(this)">▶ Run</button>\` : '';
-            return \`<div class="code-header"><span>\${langLabel}</span><div><button class="insert-btn" onclick="insertCode(this)">Insert</button>\${runBtn}</div></div><pre><code class="language-\${lang}">\${escapedCode}</code></pre>\`;
+            // Insert 버튼 제거: Agent 모드에서는 FILE_OPERATION으로 처리되고, 일반 채팅에서도 불필요
+            return \`<div class="code-header"><span>\${langLabel}</span><div>\${runBtn}</div></div><pre><code class="language-\${lang}">\${escapedCode}</code></pre>\`;
             });
             result = result.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
             result = result.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
@@ -2850,11 +2981,7 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             stopBtn.classList.remove('visible');
             }
 
-            function insertCode(btn) {
-            const pre = btn.closest('.code-header').nextElementSibling;
-            const code = pre.querySelector('code').textContent;
-            vscode.postMessage({ command: 'insertCode', code: code });
-            }
+            // insertCode 함수 제거됨 - Insert 버튼이 더 이상 표시되지 않음
 
             function runCommand(btn) {
             const pre = btn.closest('.code-header').nextElementSibling;
@@ -3158,12 +3285,8 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             messageInput.placeholder = modePlaceholders[currentMode];
             vscode.postMessage({ command: 'selectMode', mode: currentMode });
             
-            // Agent 모드일 때 체크포인트 로드
-            if (currentMode === 'agent') {
-            vscode.postMessage({ command: 'getCheckpoints' });
-            } else {
-            checkpointsPanel.classList.remove('visible');
-            }
+            // Agent 모드이고 checkpoint 기능이 활성화된 경우에만 체크포인트 로드 및 패널 표시
+            // (설정은 서버에서 확인되므로 여기서는 일단 표시하지 않음, modeChanged 이벤트에서 처리됨)
             });
             });
 
@@ -3310,6 +3433,15 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             });
             modeDescription.textContent = modeDescriptions[currentMode];
             messageInput.placeholder = modePlaceholders[currentMode];
+            
+            // Agent 모드이고 checkpoint 기능이 활성화된 경우에만 체크포인트 패널 표시 및 로드
+            const checkpointsEnabled = message.checkpointsEnabled !== undefined ? message.checkpointsEnabled : false;
+            if (currentMode === 'agent' && checkpointsEnabled) {
+            checkpointsPanel.classList.add('visible');
+            vscode.postMessage({ command: 'getCheckpoints' });
+            } else {
+            checkpointsPanel.classList.remove('visible');
+            }
             break;
             case 'showOperations':
             showOperations(message.operations);
@@ -3364,9 +3496,10 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             }
 
             function updateCheckpointsUI(checkpoints) {
+            // Agent 모드이고 checkpoint가 활성화된 경우에만 checkpoints가 없어도 패널 표시
             if (!checkpoints || checkpoints.length === 0) {
-            checkpointsList.innerHTML = '<div style="opacity:0.6; font-size:0.85em; padding:8px;">No checkpoints yet</div>';
-            checkpointsPanel.classList.remove('visible');
+            checkpointsList.innerHTML = '<div style="opacity:0.6; font-size:0.85em; padding:8px;">No checkpoints yet. Checkpoints will be created automatically before each step execution.</div>';
+            // 패널 표시는 modeChanged 이벤트에서 처리됨
             return;
             }
 
@@ -3416,10 +3549,8 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             });
             }
 
-            // Agent 모드일 때 체크포인트 목록 로드
-            if (currentMode === 'agent') {
-            vscode.postMessage({ command: 'getCheckpoints' });
-            }
+            // Agent 모드이고 checkpoint가 활성화된 경우에만 체크포인트 목록 로드
+            // (설정은 서버에서 확인되므로 여기서는 로드하지 않음, modeChanged 이벤트에서 처리됨)
 
             function updatePlanUI(plan) {
             if (!plan || plan.length === 0) {
@@ -3508,7 +3639,6 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             e.preventDefault();
             });
 
-            window.insertCode = insertCode;
             window.runCommand = runCommand;
             }) ();
 

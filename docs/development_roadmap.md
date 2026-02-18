@@ -266,7 +266,31 @@
 
 ---
 
-### 4.2 실시간 터미널 출력 스트리밍
+### ✅ 4.2 기본 터미널 실행 기능
+
+**✅ 구현 완료** (2026-02-17)
+
+**구현 내용**:
+- Agent가 터미널 명령을 자동으로 실행할 수 있도록 `run` 액션 지원
+- Planning 단계에서 터미널 명령 실행 계획 포함
+- Execution 단계에서 터미널 명령 실행 프롬프트 추가
+- VS Code 터미널 API를 사용하여 명령 실행 및 출력 표시
+- 터미널 실행 결과를 채팅에 표시 및 Agent에게 피드백
+- Agent 모드에서 FILE_OPERATION이 없을 때 자율 루프 시작
+
+**사용 예시**:
+- "npm install 실행해줘" → Agent가 자동으로 `npm install` 실행
+- "테스트 실행해줘" → Agent가 `npm test` 실행
+- "빌드해줘" → Agent가 `npm run build` 실행
+
+**수정된 파일**:
+- `src/agent/engine.ts` → Planning/Execution 프롬프트에 run 액션 설명 추가
+- `src/agent/executor.ts` → VS Code 터미널 API 사용하여 명령 실행
+- `src/chat/chatPanel.ts` → Agent 모드에서 자율 루프 시작 로직 추가
+
+---
+
+### 4.3 실시간 터미널 출력 스트리밍 (향후 구현)
 
 **목적**: 장시간 실행되는 프로세스와 병행 작업 가능
 
