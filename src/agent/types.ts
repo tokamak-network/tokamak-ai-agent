@@ -1,3 +1,4 @@
+import * as vscode from 'vscode';
 import { ChatMessage } from '../api/client.js';
 
 export type AgentState =
@@ -30,9 +31,11 @@ export interface AgentContext {
     workspacePath: string;
     maxFixAttempts: number;
     tokenBudget: number;
+    extensionContext?: vscode.ExtensionContext; // 체크포인트 관리용
     onStateChange?: (state: AgentState) => void;
     onPlanChange?: (plan: PlanStep[]) => void;
     onMessage?: (role: string, content: string) => void;
+    onCheckpointCreated?: (checkpointId: string) => void; // 체크포인트 생성 콜백
 }
 
 export interface AgentAction {
