@@ -32,6 +32,10 @@ export class Executor {
         const edit = new vscode.WorkspaceEdit();
 
         try {
+            // 자동 실행 코드 제거 및 백틱 정리 (테스트 파일 등)
+            content = this.removeAutoExecutionCode(content, path);
+            content = this.removeTrailingBackticks(content);
+
             // SEARCH/REPLACE 로직 처리 (Diff-like updates)
             if (content.includes('<<<<<<< SEARCH')) {
                 const existingData = await vscode.workspace.fs.readFile(fileUri);
@@ -51,8 +55,27 @@ export class Executor {
 
                     if (searchPart && replacePart) {
                         const trimmedSearch = searchPart.trim();
+                        const trimmedReplace = replacePart.trim();
+                        // SEARCH와 REPLACE가 동일하면 스킵 (불필요한 변경 방지)
+                        if (trimmedSearch === trimmedReplace) {
+                            continue;
+                        }
+                        // 의심스러운 코드 삭제 감지: SEARCH가 REPLACE보다 훨씬 긴 경우
+                        const searchLines = trimmedSearch.split('\n').length;
+                        const replaceLines = trimmedReplace.split('\n').length;
+                        const searchLength = trimmedSearch.length;
+                        const replaceLength = trimmedReplace.length;
+                        
+                        // REPLACE가 빈 문자열이거나, SEARCH가 REPLACE보다 3배 이상 긴 경우 스킵
+                        if (trimmedReplace === '' || 
+                            (searchLines > 3 && replaceLines === 0) ||
+                            (searchLength > 100 && replaceLength < searchLength * 0.3)) {
+                            console.warn(`[Executor] Suspicious code deletion detected in ${path}: ${searchLines} lines → ${replaceLines} lines. Skipping.`);
+                            continue;
+                        }
+                        
                         if (currentContent.includes(trimmedSearch)) {
-                            currentContent = currentContent.replace(trimmedSearch, replacePart.trim());
+                            currentContent = currentContent.replace(trimmedSearch, trimmedReplace);
                             anyApplied = true;
                         }
                     }
@@ -239,6 +262,13 @@ export class Executor {
         const backupMap = new Map<string, string>(); // 롤백을 위한 백업
 
         try {
+            // 0. 자동 실행 코드 제거 (모든 operation의 content에서)
+            for (const op of operations) {
+                if (op.content && (op.operation === 'create' || op.operation === 'edit')) {
+                    op.content = this.removeAutoExecutionCode(op.content, op.path);
+                }
+            }
+
             // 1. 백업 생성 (기존 파일들)
             for (const op of operations) {
                 if (op.operation === 'edit' || op.operation === 'delete') {
@@ -281,8 +311,27 @@ export class Executor {
 
                                 if (searchPart && replacePart) {
                                     const trimmedSearch = searchPart.trim();
+                                    const trimmedReplace = replacePart.trim();
+                                    // SEARCH와 REPLACE가 동일하면 스킵 (불필요한 변경 방지)
+                                    if (trimmedSearch === trimmedReplace) {
+                                        continue;
+                                    }
+                                    // 의심스러운 코드 삭제 감지: SEARCH가 REPLACE보다 훨씬 긴 경우
+                                    const searchLines = trimmedSearch.split('\n').length;
+                                    const replaceLines = trimmedReplace.split('\n').length;
+                                    const searchLength = trimmedSearch.length;
+                                    const replaceLength = trimmedReplace.length;
+                                    
+                                    // REPLACE가 빈 문자열이거나, SEARCH가 REPLACE보다 3배 이상 긴 경우 스킵
+                                    if (trimmedReplace === '' || 
+                                        (searchLines > 3 && replaceLines === 0) ||
+                                        (searchLength > 100 && replaceLength < searchLength * 0.3)) {
+                                        console.warn(`[Executor] Suspicious code deletion detected in ${op.path}: ${searchLines} lines → ${replaceLines} lines. Skipping.`);
+                                        continue;
+                                    }
+                                    
                                     if (currentContent.includes(trimmedSearch)) {
-                                        currentContent = currentContent.replace(trimmedSearch, replacePart.trim());
+                                        currentContent = currentContent.replace(trimmedSearch, trimmedReplace);
                                         anyApplied = true;
                                     }
                                 }
@@ -376,6 +425,13 @@ export class Executor {
         operations: MultiFileOperation[],
         workspaceFolder: vscode.WorkspaceFolder
     ): Promise<string> {
+        // 자동 실행 코드 제거 (모든 operation의 content에서)
+        for (const op of operations) {
+            if (op.content && (op.operation === 'create' || op.operation === 'edit')) {
+                op.content = this.removeAutoExecutionCode(op.content, op.path);
+            }
+        }
+
         const results: string[] = [];
         let successCount = 0;
         let failCount = 0;
@@ -407,5 +463,56 @@ export class Executor {
 
         const summary = `Completed ${operations.length} operation(s): ${successCount} succeeded, ${failCount} failed.`;
         return `${summary}\n${results.join('\n')}`;
+    }
+
+    /** 테스트 파일 등에서 자동 실행 코드(run(), main() 등) 제거 */
+    private removeAutoExecutionCode(content: string, filePath: string): string {
+        if (!content) return content;
+
+        // 테스트 파일인지 확인 (경로에 test/spec 포함 또는 확장자 확인)
+        const isTestFile = /test|spec/i.test(filePath) || 
+                          /\.(test|spec)\.(ts|js|tsx|jsx|py|go|java)$/i.test(filePath);
+
+        // 모든 파일에서 제거하되, 테스트 파일은 더 엄격하게
+        let cleaned = content;
+
+        // JavaScript/TypeScript 패턴 제거
+        // run(); 또는 run() (줄 끝)
+        cleaned = cleaned.replace(/^\s*run\(\)\s*;?\s*$/gm, '');
+        // function run() { ... } run(); 패턴
+        cleaned = cleaned.replace(/\n\s*function\s+run\(\)\s*\{[\s\S]*?\}\s*\n\s*run\(\)\s*;?\s*$/m, '');
+        // const run = () => { ... }; run(); 패턴
+        cleaned = cleaned.replace(/\n\s*(const|let|var)\s+run\s*=\s*[^;]+;\s*\n\s*run\(\)\s*;?\s*$/m, '');
+        
+        // main() 호출 제거
+        cleaned = cleaned.replace(/^\s*main\(\)\s*;?\s*$/gm, '');
+        
+        // Python 패턴 제거
+        cleaned = cleaned.replace(/\n\s*if\s+__name__\s*==\s*['"]__main__['"]\s*:\s*\n[\s\S]*$/m, '');
+        
+        // Node.js 패턴 제거
+        cleaned = cleaned.replace(/\n\s*if\s+require\.main\s*===\s*module\s*\{[\s\S]*?\}\s*$/m, '');
+
+        // "All tests passed" 같은 메시지와 함께 있는 run() 호출 제거
+        cleaned = cleaned.replace(/\n\s*console\.log\(['"]All tests passed['"]\)\s*;?\s*\n\s*run\(\)\s*;?\s*$/m, '');
+        cleaned = cleaned.replace(/\n\s*console\.log\(['"]All tests passed['"]\)\s*;?\s*$/m, '');
+
+        // 마지막 빈 줄 정리
+        cleaned = cleaned.replace(/\n{3,}$/, '\n\n');
+        cleaned = cleaned.trimEnd();
+
+        return cleaned;
+    }
+
+    /** 코드 끝에 남아있는 백틱(```) 제거 */
+    private removeTrailingBackticks(content: string): string {
+        if (!content) return content;
+        let cleaned = content;
+        // 끝에 있는 백틱 제거 (줄바꿈 포함)
+        cleaned = cleaned.replace(/\n*```+\s*$/m, '');
+        cleaned = cleaned.replace(/```+\s*$/m, '');
+        // 여러 줄의 백틱 제거
+        cleaned = cleaned.replace(/(\n```+\s*)+$/m, '');
+        return cleaned.trimEnd();
     }
 }

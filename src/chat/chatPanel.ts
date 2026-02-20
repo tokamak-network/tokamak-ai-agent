@@ -907,7 +907,10 @@ Rules for SEARCH/REPLACE:
 1. The SEARCH part must EXACTLY match the code in the file, including indentation and spacing.
 2. Provide enough context in the SEARCH block to make it unique.
 3. You can have multiple SEARCH/REPLACE blocks in one CONTENT section.
-4. Always explain what you're doing before the operations.
+4. **CRITICAL: If SEARCH and REPLACE content are identical, DO NOT create a SEARCH/REPLACE block. Skip that change entirely.**
+5. **CRITICAL: DO NOT delete existing code unless explicitly requested. If REPLACE is empty or much shorter than SEARCH, this will be rejected.**
+6. **CRITICAL: When writing test files, DO NOT include auto-execution code at the end (e.g., `run()`, `main()`, `if __name__ == '__main__'`, etc.). Test files should only contain test definitions, not execution code.**
+7. Always explain what you're doing before the operations.
 - Be careful and precise with file paths.
 - Ask for confirmation if the task is ambiguous.
 
@@ -997,31 +1000,41 @@ export function helper() {
                         contentText = contentText.substring(3).trim();
                     }
                     
-                    // 닫는 백틱 찾기: 뒤에서부터 검색하여 마지막 ``` 찾기
-                    // 이렇게 하면 코드 블록 내부에 ```가 있어도 정확하게 처리됨
+                    // 닫는 백틱 찾기: 줄 시작 부분의 ``` 찾기 (코드 내부의 ```와 구분)
                     let lastBacktickIndex = -1;
                     
-                    // 뒤에서부터 검색 (마지막 닫는 백틱 찾기)
-                    for (let i = contentText.length - 3; i >= 0; i--) {
-                        if (contentText.substring(i, i + 3) === '```') {
-                            // 이전 문자가 줄바꿈이거나 시작인지 확인 (진짜 닫는 백틱인지)
-                            const beforeChar = i > 0 ? contentText[i - 1] : '\n';
-                            if (beforeChar === '\n' || i === 0) {
-                                lastBacktickIndex = i;
-                                break;
+                    // 줄 단위로 검색하여 줄 시작에 있는 ``` 찾기
+                    const lines = contentText.split('\n');
+                    for (let i = lines.length - 1; i >= 0; i--) {
+                        const trimmedLine = lines[i].trim();
+                        if (trimmedLine === '```' || trimmedLine.startsWith('```')) {
+                            // 이 줄까지의 내용만 사용 (닫는 백틱 제외)
+                            lastBacktickIndex = contentText.lastIndexOf('\n' + lines[i]);
+                            if (lastBacktickIndex === -1) {
+                                // 첫 줄인 경우
+                                lastBacktickIndex = contentText.indexOf(lines[i]);
                             }
+                            break;
                         }
                     }
                     
                     if (lastBacktickIndex >= 0) {
-                        // 닫는 백틱 전까지의 내용 추출
+                        // 닫는 백틱이 있는 줄 전까지의 내용 추출
                         content = contentText.substring(0, lastBacktickIndex).trim();
                     } else {
-                        // 닫는 백틱이 없으면 끝까지 (스트리밍 중이거나 누락된 경우)
-                        // 이 경우 전체 내용을 포함하여 파일이 잘리지 않도록 함
+                        // 닫는 백틱이 없으면 끝까지 사용하되, 끝에 ```가 있으면 제거
                         content = contentText.trim();
-                        console.warn(`[parseFileOperations] No closing backticks found for ${pathMatch?.[1]}, using full content`);
+                        // 끝에 남아있는 백틱 제거 (안전장치)
+                        content = content.replace(/\n*```+\s*$/m, '');
+                        content = content.replace(/```+\s*$/m, '');
+                        if (contentText !== content) {
+                            console.warn(`[parseFileOperations] Removed trailing backticks from ${pathMatch?.[1]}`);
+                        }
                     }
+                    
+                    // 추가 안전장치: 내용 끝에 남아있는 백틱 제거
+                    content = content.replace(/\n*```+\s*$/m, '');
+                    content = content.trimEnd();
                 } else {
                     // 백틱이 없으면 CONTENT: 다음부터 블록 끝까지 전체 내용
                     // 이렇게 하면 마크다운 파일의 모든 내용이 포함됨
@@ -1040,7 +1053,67 @@ export function helper() {
             }
         }
 
+        // 자동 실행 코드 제거 및 백틱 정리 (테스트 파일 등)
+        for (const op of operations) {
+            if (op.content && (op.type === 'create' || op.type === 'edit')) {
+                op.content = this.removeAutoExecutionCode(op.content, op.path);
+                // 코드 끝에 남아있는 백틱 제거 (안전장치)
+                op.content = this.removeTrailingBackticks(op.content);
+            }
+        }
+
         return operations;
+    }
+
+    /** 코드 끝에 남아있는 백틱(```) 제거 */
+    private removeTrailingBackticks(content: string): string {
+        if (!content) return content;
+        let cleaned = content;
+        // 끝에 있는 백틱 제거 (줄바꿈 포함)
+        cleaned = cleaned.replace(/\n*```+\s*$/m, '');
+        cleaned = cleaned.replace(/```+\s*$/m, '');
+        // 여러 줄의 백틱 제거
+        cleaned = cleaned.replace(/(\n```+\s*)+$/m, '');
+        return cleaned.trimEnd();
+    }
+
+    /** 테스트 파일 등에서 자동 실행 코드(run(), main() 등) 제거 */
+    private removeAutoExecutionCode(content: string, filePath: string): string {
+        if (!content) return content;
+
+        // 테스트 파일인지 확인 (경로에 test/spec 포함 또는 확장자 확인)
+        const isTestFile = /test|spec/i.test(filePath) || 
+                          /\.(test|spec)\.(ts|js|tsx|jsx|py|go|java)$/i.test(filePath);
+
+        // 모든 파일에서 제거하되, 테스트 파일은 더 엄격하게
+        let cleaned = content;
+
+        // JavaScript/TypeScript 패턴 제거
+        // run(); 또는 run() (줄 끝)
+        cleaned = cleaned.replace(/^\s*run\(\)\s*;?\s*$/gm, '');
+        // function run() { ... } run(); 패턴
+        cleaned = cleaned.replace(/\n\s*function\s+run\(\)\s*\{[\s\S]*?\}\s*\n\s*run\(\)\s*;?\s*$/m, '');
+        // const run = () => { ... }; run(); 패턴
+        cleaned = cleaned.replace(/\n\s*(const|let|var)\s+run\s*=\s*[^;]+;\s*\n\s*run\(\)\s*;?\s*$/m, '');
+        
+        // main() 호출 제거
+        cleaned = cleaned.replace(/^\s*main\(\)\s*;?\s*$/gm, '');
+        
+        // Python 패턴 제거
+        cleaned = cleaned.replace(/\n\s*if\s+__name__\s*==\s*['"]__main__['"]\s*:\s*\n[\s\S]*$/m, '');
+        
+        // Node.js 패턴 제거
+        cleaned = cleaned.replace(/\n\s*if\s+require\.main\s*===\s*module\s*\{[\s\S]*?\}\s*$/m, '');
+
+        // "All tests passed" 같은 메시지와 함께 있는 run() 호출 제거
+        cleaned = cleaned.replace(/\n\s*console\.log\(['"]All tests passed['"]\)\s*;?\s*\n\s*run\(\)\s*;?\s*$/m, '');
+        cleaned = cleaned.replace(/\n\s*console\.log\(['"]All tests passed['"]\)\s*;?\s*$/m, '');
+
+        // 마지막 빈 줄 정리
+        cleaned = cleaned.replace(/\n{3,}$/, '\n\n');
+        cleaned = cleaned.trimEnd();
+
+        return cleaned;
     }
 
     private async applyFileOperations(): Promise<void> {
@@ -1086,8 +1159,33 @@ export function helper() {
 
                                     if (searchPart && replacePart) {
                                         const trimmedSearch = searchPart.trim();
+                                        const trimmedReplace = replacePart.trim();
+                                        // SEARCH와 REPLACE가 동일하면 스킵 (불필요한 변경 방지)
+                                        if (trimmedSearch === trimmedReplace) {
+                                            continue;
+                                        }
+                                        // 의심스러운 코드 삭제 감지: SEARCH가 REPLACE보다 훨씬 긴 경우
+                                        const searchLines = trimmedSearch.split('\n').length;
+                                        const replaceLines = trimmedReplace.split('\n').length;
+                                        const searchLength = trimmedSearch.length;
+                                        const replaceLength = trimmedReplace.length;
+                                        
+                                        // REPLACE가 빈 문자열이거나, SEARCH가 REPLACE보다 3배 이상 긴 경우 경고 후 스킵
+                                        if (trimmedReplace === '' || 
+                                            (searchLines > 3 && replaceLines === 0) ||
+                                            (searchLength > 100 && replaceLength < searchLength * 0.3)) {
+                                            vscode.window.showWarningMessage(
+                                                `⚠️ 의심스러운 코드 삭제 감지: ${op.path}\n` +
+                                                `SEARCH: ${searchLines}줄 (${searchLength}자) → REPLACE: ${replaceLines}줄 (${replaceLength}자)\n` +
+                                                `기존 코드가 대량 삭제될 수 있습니다. 이 변경을 스킵합니다.`,
+                                                '확인'
+                                            );
+                                            // 기본적으로 의심스러운 삭제는 스킵
+                                            continue;
+                                        }
+                                        
                                         if (currentContent.includes(trimmedSearch)) {
-                                            currentContent = currentContent.replace(trimmedSearch, replacePart.trim());
+                                            currentContent = currentContent.replace(trimmedSearch, trimmedReplace);
                                             anyApplied = true;
                                         }
                                     }
@@ -1382,6 +1480,23 @@ export function helper() {
                             const searchContent = searchParts[0].split('<<<<<<< SEARCH')[1]?.trim();
                             const replaceContent = searchParts[1]?.trim();
                             if (searchContent !== undefined && replaceContent !== undefined) {
+                                // SEARCH와 REPLACE가 동일하면 스킵 (불필요한 변경 방지)
+                                if (searchContent === replaceContent) {
+                                    continue;
+                                }
+                                // 의심스러운 코드 삭제 감지
+                                const searchLines = searchContent.split('\n').length;
+                                const replaceLines = replaceContent.split('\n').length;
+                                const searchLength = searchContent.length;
+                                const replaceLength = replaceContent.length;
+                                
+                                if (replaceContent === '' || 
+                                    (searchLines > 3 && replaceLines === 0) ||
+                                    (searchLength > 100 && replaceLength < searchLength * 0.3)) {
+                                    // 미리보기에서는 표시하되 실제 적용은 스킵됨
+                                    continue;
+                                }
+                                
                                 if (result.includes(searchContent)) {
                                     result = result.replace(searchContent, replaceContent);
                                 }

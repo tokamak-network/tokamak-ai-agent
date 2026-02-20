@@ -431,6 +431,9 @@ ${errorContext}
 이 에러를 수정하기 위한 JSON Action을 생성해주세요. 
 파일이 길 경우 반드시 **Search/Replace** 형식을 사용하여 필요한 부분만 수정하세요.
 형식: { "type": "write", "payload": { "path": "...", "content": "<<<<<<< SEARCH\\n...\\n=======\\n...\\n>>>>>>> REPLACE" } }
+**중요**: 
+- SEARCH와 REPLACE 내용이 동일하면 SEARCH/REPLACE 블록을 생성하지 마세요. 변경이 없으면 해당 작업을 생략하세요.
+- 기존 코드를 삭제하지 마세요. REPLACE가 빈 문자열이거나 SEARCH보다 훨씬 짧으면 거부됩니다. 사용자가 명시적으로 삭제를 요청한 경우에만 삭제하세요.
 `;
 
         try {
