@@ -172,6 +172,54 @@ Be constructive and specific in your feedback.`,
         })
     );
 
+    context.subscriptions.push(
+        vscode.commands.registerCommand('tokamak.initKnowledge', async () => {
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                vscode.window.showErrorMessage('No workspace folder open');
+                return;
+            }
+
+            const knowledgeDir = vscode.Uri.joinPath(workspaceFolder.uri, '.tokamak', 'knowledge');
+            const readmeContent = `# Project Knowledge
+
+Files in this folder are automatically loaded into the AI context when you start a new chat.
+Use this for project-specific conventions, architecture decisions, and common patterns.
+
+Supported formats: \`.md\`, \`.txt\` (alphabetical by filename, max ~8KB total).
+
+## Example files you can add
+- \`conventions.md\` — Coding style, naming, formatting
+- \`architecture.md\` — Structure, layers, folder rules
+- \`patterns.md\` — Reusable patterns and how to use them
+`;
+
+            const conventionsContent = `# Coding Conventions
+
+- Use TypeScript strict mode.
+- Prefer named exports over default exports.
+- File naming: camelCase for utilities, PascalCase for components/classes.
+- (Edit this file with your project's actual conventions.)
+`;
+
+            try {
+                await vscode.workspace.fs.createDirectory(knowledgeDir);
+                await vscode.workspace.fs.writeFile(
+                    vscode.Uri.joinPath(knowledgeDir, 'README.md'),
+                    Buffer.from(readmeContent, 'utf8')
+                );
+                await vscode.workspace.fs.writeFile(
+                    vscode.Uri.joinPath(knowledgeDir, 'conventions.md'),
+                    Buffer.from(conventionsContent, 'utf8')
+                );
+                vscode.window.showInformationMessage('Project knowledge folder created at .tokamak/knowledge/');
+                await vscode.window.showTextDocument(vscode.Uri.joinPath(knowledgeDir, 'conventions.md'));
+            } catch (error) {
+                vscode.window.showErrorMessage(`Failed to create knowledge folder: ${error}`);
+            }
+        })
+    );
+
     // Listen for configuration changes
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((e) => {

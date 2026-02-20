@@ -789,14 +789,56 @@ export class ChatPanel {
         }
     }
 
+    /** Load project knowledge from .tokamak/knowledge/ (conventions, architecture, patterns). Included in system prompt for new chats. */
+    private async getProjectKnowledge(): Promise<string> {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        if (!workspaceFolder) return '';
+
+        const knowledgeDir = vscode.Uri.joinPath(workspaceFolder.uri, '.tokamak', 'knowledge');
+        const MAX_KNOWLEDGE_CHARS = 8000;
+
+        try {
+            const entries = await vscode.workspace.fs.readDirectory(knowledgeDir);
+            const textFiles = entries
+                .filter(([name, type]) => type === vscode.FileType.File && (name.endsWith('.md') || name.endsWith('.txt')))
+                .map(([name]) => name)
+                .sort();
+
+            if (textFiles.length === 0) return '';
+
+            const parts: string[] = [];
+            let totalLen = 0;
+
+            for (const name of textFiles) {
+                if (totalLen >= MAX_KNOWLEDGE_CHARS) break;
+                const fileUri = vscode.Uri.joinPath(knowledgeDir, name);
+                const data = await vscode.workspace.fs.readFile(fileUri);
+                const content = Buffer.from(data).toString('utf8').trim();
+                if (!content) continue;
+                const chunk = `### ${name}\n${content}`;
+                const allowed = Math.min(chunk.length, MAX_KNOWLEDGE_CHARS - totalLen);
+                if (allowed <= 0) break;
+                parts.push(allowed < chunk.length ? chunk.slice(0, allowed) + '\n...(truncated)' : chunk);
+                totalLen += chunk.length;
+            }
+
+            if (parts.length === 0) return '';
+            return `\n--- Project Knowledge (.tokamak/knowledge/) ---\nUse the following project-specific context when answering. Follow conventions and patterns described here.\n\n${parts.join('\n\n')}\n`;
+        } catch {
+            return '';
+        }
+    }
+
     private async getSystemPromptForMode(): Promise<string> {
         const workspaceInfo = this.getWorkspaceInfo();
         const projectStructure = await this.getProjectStructure();
+        const projectKnowledge = await this.getProjectKnowledge();
 
         switch (this.currentMode) {
             case 'ask':
                 return `You are a helpful coding assistant integrated with VS Code.${workspaceInfo}
 ${projectStructure}
+${projectKnowledge}
 
 General Rules:
 - Analyze provided context and the project structure.
@@ -816,6 +858,7 @@ DESCRIPTION: reason
 --- Project Structure ---
 The following is the directory structure of the current workspace. Use this to identify files you might need to read.
 ${projectStructure}
+${projectKnowledge}
 
 Your role is to help the user plan their coding tasks.
 - Analyze the codebase using the project structure and 'read' operations.
@@ -834,6 +877,7 @@ Format your response as:
             case 'agent':
                 return `You are an autonomous coding agent integrated with VS Code.${workspaceInfo}
 ${projectStructure}
+${projectKnowledge}
 
 You can perform file operations. When you need to create, edit, or delete files, output them in this EXACT format:
 

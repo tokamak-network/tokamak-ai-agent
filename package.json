@@ -2,7 +2,7 @@
   "name": "tokamak-agent",
   "displayName": "Tokamak AI Agent",
   "description": "AI coding assistant powered by company's LiteLLM-based OpenAI-compatible API",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "tokamak",
   "license": "MIT",
   "repository": {
@@ -25,6 +25,7 @@
     "onCommand:tokamak.clearChat",
     "onCommand:tokamak.sendToChat",
     "onCommand:tokamak.initSkills",
+    "onCommand:tokamak.initKnowledge",
     "onStartupFinished"
   ],
   "main": "./out/extension.js",
@@ -98,6 +99,10 @@
       {
         "command": "tokamak.initSkills",
         "title": "Tokamak: Initialize Skills Folder"
+      },
+      {
+        "command": "tokamak.initKnowledge",
+        "title": "Tokamak: Initialize Project Knowledge Folder"
       }
     ],
     "keybindings": [

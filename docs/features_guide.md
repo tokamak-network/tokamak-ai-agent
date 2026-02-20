@@ -47,6 +47,7 @@
 | `Tokamak: Clear Chat History` | 채팅 기록 초기화 |
 | `Tokamak: Send to Chat` | 선택한 코드를 채팅으로 보내기 |
 | `Tokamak: Initialize Skills Folder` | `.tokamak/skills/` 폴더 생성 |
+| `Tokamak: Initialize Project Knowledge Folder` | `.tokamak/knowledge/` 폴더 및 샘플 파일 생성 |
 
 ---
 
@@ -217,6 +218,14 @@ AI에게 자동으로 전달되는 프로젝트 정보입니다.
 | **워크스페이스 정보** | 워크스페이스 이름 |
 | **첨부 파일** | `@`로 첨부하거나 드래그한 파일의 전체 내용 |
 | **대화 기록** | 이전 대화 내용 (컨텍스트 유지) |
+| **프로젝트 지식** | `.tokamak/knowledge/` 내 `.md`, `.txt` (새 대화 시 자동 포함) |
+
+### 프로젝트 지식 베이스 (.tokamak/knowledge/)
+
+- **위치**: 워크스페이스 루트의 `.tokamak/knowledge/` (프로젝트별)
+- **역할**: 코딩 컨벤션, 아키텍처 결정, 자주 쓰는 패턴 등을 문서로 두면 **새 채팅을 시작할 때** 시스템 프롬프트에 자동으로 포함됩니다.
+- **지원 형식**: `.md`, `.txt` (파일명 알파벳 순, 전체 약 8KB 제한)
+- **초기화**: `Tokamak: Initialize Project Knowledge Folder` 실행 시 폴더와 샘플 `conventions.md`, `README.md` 생성
 
 ### RAG 기반 파일 검색 (AGENT 모드)
 
