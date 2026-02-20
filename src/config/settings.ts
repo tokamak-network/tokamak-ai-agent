@@ -26,8 +26,8 @@ export function getSettings(): TokamakSettings {
     return {
         apiKey: config.get<string>('apiKey', ''),
         baseUrl: TOKAMAK_API_BASE_URL,
-        models: config.get<string[]>('models', ['qwen3-coder-pro']),
-        selectedModel: config.get<string>('selectedModel', 'qwen3-coder-pro'),
+        models: config.get<string[]>('models', ['qwen3-235b', 'qwen3-80b-next', 'qwen3-coder-flash']),
+        selectedModel: config.get<string>('selectedModel', 'qwen3-235b'),
         enableInlineCompletion: config.get<boolean>('enableInlineCompletion', true),
         completionDebounceMs: config.get<number>('completionDebounceMs', 300),
         enableCheckpoints: config.get<boolean>('enableCheckpoints', false),
