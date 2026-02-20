@@ -27,7 +27,7 @@
 1. **VS Code 확장 설치** 후 `Cmd+Shift+P` → `Tokamak: Open Chat` 실행
 2. **Settings**(`Cmd+,`) → `tokamak` 검색 후 아래 항목 설정:
    - `tokamak.apiKey`: AI API 키
-   - `tokamak.baseUrl`: API 엔드포인트 URL (예: `https://your-api.com/v1`)
+   - API 엔드포인트는 `https://api.ai.tokamak.network`로 고정 (설정 불가)
    - `tokamak.models`: 사용 가능한 모델 목록 (배열)
    - `tokamak.selectedModel`: 기본 선택 모델
 
@@ -278,8 +278,7 @@ Idle → Planning → Executing → Observing → Executing → ... → Done
 
 | 설정 키 | 타입 | 기본값 | 설명 |
 |---------|------|--------|------|
-| `tokamak.apiKey` | string | `""` | AI API 키 |
-| `tokamak.baseUrl` | string | `""` | AI API 엔드포인트 URL |
+| `tokamak.apiKey` | string | `""` | AI API 키 (엔드포인트는 `https://api.ai.tokamak.network` 고정) |
 | `tokamak.models` | string[] | `["qwen3-235b"]` | 사용 가능한 모델 목록 |
 | `tokamak.selectedModel` | string | `"qwen3-235b"` | 현재 선택된 모델 |
 | `tokamak.enableInlineCompletion` | boolean | `true` | 인라인 코드 완성 활성화 |

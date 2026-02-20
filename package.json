@@ -38,11 +38,6 @@
           "default": "",
           "description": "API Key for the AI service"
         },
-        "tokamak.baseUrl": {
-          "type": "string",
-          "default": "",
-          "description": "Base URL for the AI API endpoint"
-        },
         "tokamak.models": {
           "type": "array",
           "items": {

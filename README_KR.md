@@ -24,7 +24,7 @@
 | 설정 | 설명 | 필수 |
 |------|------|:----:|
 | `tokamak.apiKey` | AI 서비스 API Key | ✅ |
-| `tokamak.baseUrl` | API 엔드포인트 URL (예: `https://api.example.com/v1`) | ✅ |
+| *(엔드포인트)* | `https://api.ai.tokamak.network` 고정 (설정 불가) | - |
 | `tokamak.models` | 사용 가능한 모델 목록 | - |
 | `tokamak.selectedModel` | 현재 선택된 모델 | - |
 | `tokamak.enableInlineCompletion` | Ghost Text 자동완성 활성화 | - |
@@ -34,7 +34,6 @@
 ```json
 {
   "tokamak.apiKey": "your-api-key",
-  "tokamak.baseUrl": "https://your-api-endpoint.com/v1",
   "tokamak.models": [
     "qwen3-235b-thinking",
     "qwen3-235b",
@@ -391,7 +390,7 @@ Error: 500 litellm.InternalServerError: Connection error
 ### 자동완성이 작동하지 않음
 
 - 설정에서 `tokamak.enableInlineCompletion`이 `true`인지 확인
-- API Key와 Base URL이 설정되었는지 확인
+- API Key가 설정되었는지 확인
 
 ---
 

@@ -24,7 +24,7 @@ Open Settings (`Cmd+,` on Mac / `Ctrl+,` on Windows) and search for `tokamak`.
 | Setting | Description | Required |
 |------|------|:----:|
 | `tokamak.apiKey` | AI Service API Key | ✅ |
-| `tokamak.baseUrl` | API Endpoint URL (e.g., `https://api.example.com/v1`) | ✅ |
+| *(endpoint)* | Fixed to `https://api.ai.tokamak.network` (not configurable) | - |
 | `tokamak.models` | List of available models | - |
 | `tokamak.selectedModel` | Currently selected model | - |
 | `tokamak.enableInlineCompletion` | Enable/Disable Ghost Text auto-completion | - |
@@ -34,7 +34,6 @@ Open Settings (`Cmd+,` on Mac / `Ctrl+,` on Windows) and search for `tokamak`.
 ```json
 {
   "tokamak.apiKey": "your-api-key",
-  "tokamak.baseUrl": "https://your-api-endpoint.com/v1",
   "tokamak.models": [
     "qwen3-235b-thinking",
     "qwen3-235b",

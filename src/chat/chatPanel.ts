@@ -1433,13 +1433,12 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
 **설정 방법:**
 1. \`Cmd + ,\` (Mac) / \`Ctrl + ,\` (Windows)로 설정 열기
 2. \`tokamak\` 검색
-3. \`API Key\`와 \`Base URL\` 입력
+3. \`API Key\` 입력 (Base URL은 \`https://api.ai.tokamak.network\`로 고정)
 
 또는 \`Cmd + Shift + P\` → "Preferences: Open Settings (JSON)"에서:
 \`\`\`json
 {
-  "tokamak.apiKey": "your-api-key",
-  "tokamak.baseUrl": "https://your-api.com/v1"
+  "tokamak.apiKey": "your-api-key"
 }
 \`\`\``,
                 });
@@ -1697,7 +1696,7 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
                     this.panel.webview.postMessage({
                         command: 'addMessage',
                         role: 'assistant',
-                        content: '🔗 **API 엔드포인트 오류**\n\nAPI URL을 찾을 수 없습니다.\n\n`tokamak.baseUrl` 설정을 확인해주세요.',
+                        content: '🔗 **API 엔드포인트 오류**\n\nAPI에 연결할 수 없습니다. 네트워크 연결을 확인해주세요.',
                     });
                 } else if (error.message.includes('500') || error.message.includes('Internal')) {
                     this.panel.webview.postMessage({
@@ -1709,7 +1708,7 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
                     this.panel.webview.postMessage({
                         command: 'addMessage',
                         role: 'assistant',
-                        content: '🌐 **네트워크 연결 오류**\n\nAI 서버에 연결할 수 없습니다.\n\n- 인터넷 연결을 확인해주세요\n- `tokamak.baseUrl`이 올바른지 확인해주세요\n- VPN이 필요한 경우 연결되어 있는지 확인해주세요',
+                        content: '🌐 **네트워크 연결 오류**\n\nAI 서버에 연결할 수 없습니다.\n\n- 인터넷 연결을 확인해주세요\n- VPN이 필요한 경우 연결되어 있는지 확인해주세요',
                     });
                 } else {
                     this.panel.webview.postMessage({

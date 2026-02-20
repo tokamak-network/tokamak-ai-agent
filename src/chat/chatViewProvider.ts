@@ -113,7 +113,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 this.postMessage({
                     command: 'addMessage',
                     role: 'assistant',
-                    content: 'Please configure the API Key and Base URL in settings first.',
+                    content: 'Please configure the API Key in settings first.',
                 });
                 return;
             }

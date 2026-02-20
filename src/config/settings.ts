@@ -1,5 +1,8 @@
 import * as vscode from 'vscode';
 
+/** Fixed API endpoint (not user-configurable). */
+export const TOKAMAK_API_BASE_URL = 'https://api.ai.tokamak.network';
+
 export interface TokamakSettings {
     apiKey: string;
     baseUrl: string;
@@ -22,7 +25,7 @@ export function getSettings(): TokamakSettings {
     const config = vscode.workspace.getConfiguration('tokamak');
     return {
         apiKey: config.get<string>('apiKey', ''),
-        baseUrl: config.get<string>('baseUrl', ''),
+        baseUrl: TOKAMAK_API_BASE_URL,
         models: config.get<string[]>('models', ['qwen3-coder-pro']),
         selectedModel: config.get<string>('selectedModel', 'qwen3-coder-pro'),
         enableInlineCompletion: config.get<boolean>('enableInlineCompletion', true),
@@ -45,24 +48,11 @@ export async function setSelectedModel(model: string): Promise<void> {
 
 export function isConfigured(): boolean {
     const settings = getSettings();
-    return settings.apiKey.length > 0 && settings.baseUrl.length > 0;
+    return settings.apiKey.length > 0;
 }
 
 export async function promptForConfiguration(): Promise<boolean> {
     const settings = getSettings();
-
-    if (!settings.baseUrl) {
-        const baseUrl = await vscode.window.showInputBox({
-            prompt: 'Enter the AI API Base URL',
-            placeHolder: 'https://your-api-endpoint.com/v1',
-            ignoreFocusOut: true,
-        });
-        if (baseUrl) {
-            await vscode.workspace.getConfiguration('tokamak').update('baseUrl', baseUrl, true);
-        } else {
-            return false;
-        }
-    }
 
     if (!settings.apiKey) {
         const apiKey = await vscode.window.showInputBox({
