@@ -86,6 +86,7 @@ export function streamChatCompletion(
 
         let lastChunk = '';
         let usage: TokenUsage | null = null;
+        const toolCallsAccum: { index: number; id?: string; name?: string; args: string }[] = [];
 
         for await (const chunk of stream) {
             if (abortSignal?.aborted) {
@@ -101,14 +102,52 @@ export function streamChatCompletion(
                 };
             }
 
-            const content = chunk.choices[0]?.delta?.content;
+            const delta = chunk.choices[0]?.delta;
+            const content = delta?.content;
             if (content) {
-                // Skip duplicate consecutive chunks (fixes double output issue)
-                if (content === lastChunk) {
-                    continue;
-                }
+                if (content === lastChunk) continue;
                 lastChunk = content;
                 yield content;
+            }
+
+            // 수집: tool_calls (minimax 등에서 content 대신 tool_calls로 내려주는 경우)
+            const tc = delta?.tool_calls;
+            if (tc?.length) {
+                for (const t of tc) {
+                    const idx = t.index ?? toolCallsAccum.length;
+                    if (!toolCallsAccum[idx]) {
+                        toolCallsAccum[idx] = { index: idx, id: t.id, name: t.function?.name, args: '' };
+                    }
+                    if (t.function?.arguments) {
+                        toolCallsAccum[idx].args += t.function.arguments;
+                    }
+                }
+            }
+        }
+
+        // 스트림 종료 후 수집된 tool_calls가 있으면 XML 형태로 한 번 더 yield (parseFileOperations에서 인식하도록)
+        if (toolCallsAccum.length > 0) {
+            for (const t of toolCallsAccum) {
+                if (!t.name || t.name !== 'edit') continue;
+                try {
+                    const parsed = JSON.parse(t.args) as Record<string, string>;
+                    const path = parsed.path ?? '';
+                    const desc = parsed.description ?? '';
+                    const body = parsed.CONTENT ?? parsed.content ?? '';
+                    if (path && body) {
+                        const xml = [
+                            '<invoke name="edit">',
+                            `<parameter name="path">${path}</parameter>`,
+                            `<parameter name="description">${desc}</parameter>`,
+                            `<parameter name="CONTENT">${body}</parameter>`,
+                            '<parameter name="OPERATION_TYPE">edit</parameter>',
+                            '</invoke>',
+                        ].join('\n');
+                        yield '\n' + xml;
+                    }
+                } catch {
+                    // arguments가 JSON이 아니면 무시
+                }
             }
         }
 

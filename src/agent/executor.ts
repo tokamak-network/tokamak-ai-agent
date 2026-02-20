@@ -32,9 +32,10 @@ export class Executor {
         const edit = new vscode.WorkspaceEdit();
 
         try {
-            // 자동 실행 코드 제거 및 백틱 정리 (테스트 파일 등)
+            // 자동 실행 코드 제거, 백틱 정리, 제어문자 표기 제거
             content = this.removeAutoExecutionCode(content, path);
             content = this.removeTrailingBackticks(content);
+            content = this.removeControlCharacterArtifacts(content);
 
             // SEARCH/REPLACE 로직 처리 (Diff-like updates)
             if (content.includes('<<<<<<< SEARCH')) {
@@ -54,8 +55,11 @@ export class Executor {
                     const replacePart = parts[1];
 
                     if (searchPart && replacePart) {
-                        const trimmedSearch = searchPart.trim();
-                        const trimmedReplace = replacePart.trim();
+                        let trimmedSearch = searchPart.trim();
+                        let trimmedReplace = replacePart.trim();
+                        // 제어문자 제거
+                        trimmedSearch = this.removeControlCharacterArtifacts(trimmedSearch);
+                        trimmedReplace = this.removeControlCharacterArtifacts(trimmedReplace);
                         // SEARCH와 REPLACE가 동일하면 스킵 (불필요한 변경 방지)
                         if (trimmedSearch === trimmedReplace) {
                             continue;
@@ -262,10 +266,12 @@ export class Executor {
         const backupMap = new Map<string, string>(); // 롤백을 위한 백업
 
         try {
-            // 0. 자동 실행 코드 제거 (모든 operation의 content에서)
+            // 0. 자동 실행 코드 제거, 백틱 정리, 제어문자 표기 제거
             for (const op of operations) {
                 if (op.content && (op.operation === 'create' || op.operation === 'edit')) {
                     op.content = this.removeAutoExecutionCode(op.content, op.path);
+                    op.content = this.removeTrailingBackticks(op.content);
+                    op.content = this.removeControlCharacterArtifacts(op.content);
                 }
             }
 
@@ -425,10 +431,12 @@ export class Executor {
         operations: MultiFileOperation[],
         workspaceFolder: vscode.WorkspaceFolder
     ): Promise<string> {
-        // 자동 실행 코드 제거 (모든 operation의 content에서)
+        // 자동 실행 코드 제거, 백틱 정리, 제어문자 표기 제거
         for (const op of operations) {
             if (op.content && (op.operation === 'create' || op.operation === 'edit')) {
                 op.content = this.removeAutoExecutionCode(op.content, op.path);
+                op.content = this.removeTrailingBackticks(op.content);
+                op.content = this.removeControlCharacterArtifacts(op.content);
             }
         }
 
@@ -513,6 +521,20 @@ export class Executor {
         cleaned = cleaned.replace(/```+\s*$/m, '');
         // 여러 줄의 백틱 제거
         cleaned = cleaned.replace(/(\n```+\s*)+$/m, '');
+        return cleaned.trimEnd();
+    }
+
+    /** AI 응답에 붙는 제어문자 표기(<ctrl46> 등) 및 실제 제어문자 제거 */
+    private removeControlCharacterArtifacts(content: string): string {
+        if (!content) return content;
+        let cleaned = content;
+        // VS Code 등에서 제어문자를 표시할 때 쓰는 <ctrlNN> 형태 완전 제거
+        cleaned = cleaned.replace(/<ctrl\d+>/gi, ''); // 모든 <ctrl숫자> 제거
+        cleaned = cleaned.replace(/\s*<ctrl\d+>\s*/gi, ''); // 공백 포함 제거
+        // 실제 ASCII 제어문자 제거 (줄바꿈\n, 탭\t, 캐리지리턴\r 제외)
+        cleaned = cleaned.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
+        // 연속된 빈 줄 정리
+        cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
         return cleaned.trimEnd();
     }
 }

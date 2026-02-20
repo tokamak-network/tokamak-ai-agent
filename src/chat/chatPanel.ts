@@ -3,7 +3,6 @@ import { streamChatCompletion, ChatMessage } from '../api/client.js';
 import { isConfigured, promptForConfiguration, getAvailableModels, getSelectedModel, setSelectedModel, isCheckpointsEnabled } from '../config/settings.js';
 import { AgentEngine } from '../agent/engine.js';
 import { AgentContext } from '../agent/types.js';
-import { Executor } from '../agent/executor.js';
 
 type ChatMode = 'ask' | 'plan' | 'agent';
 
@@ -909,7 +908,7 @@ Rules for SEARCH/REPLACE:
 3. You can have multiple SEARCH/REPLACE blocks in one CONTENT section.
 4. **CRITICAL: If SEARCH and REPLACE content are identical, DO NOT create a SEARCH/REPLACE block. Skip that change entirely.**
 5. **CRITICAL: DO NOT delete existing code unless explicitly requested. If REPLACE is empty or much shorter than SEARCH, this will be rejected.**
-6. **CRITICAL: When writing test files, DO NOT include auto-execution code at the end (e.g., `run()`, `main()`, `if __name__ == '__main__'`, etc.). Test files should only contain test definitions, not execution code.**
+6. **CRITICAL: When writing test files, DO NOT include auto-execution code at the end (e.g. run(), main(), if __name__ == '__main__', etc.). Test files should only contain test definitions, not execution code.**
 7. Always explain what you're doing before the operations.
 - Be careful and precise with file paths.
 - Ask for confirmation if the task is ambiguous.
@@ -936,19 +935,64 @@ export function helper() {
 
     private parseFileOperations(response: string): FileOperation[] {
         const operations: FileOperation[] = [];
-        
+
+        // HTML 이스케이프 복원 (웹뷰 등에서 &lt; &gt; 로 올 수 있음)
+        let raw = response.replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+
+        // minimax 등 tool_call 형식: <invoke name="edit"> ... <parameter name="path">, CONTENT 등
+        const param = (name: string) => new RegExp(`<parameter\\s+name=["']${name}["']\\s*[^>]*>([\\s\\S]*?)<\\/parameter>`, 'i');
+        const invokeStart = /<invoke\s+name=["']edit["']\s*>/gi;
+        let invokeMatch: RegExpExecArray | null;
+        while ((invokeMatch = invokeStart.exec(raw)) !== null) {
+            const afterInvoke = raw.slice(invokeMatch.index + invokeMatch[0].length);
+            const closeIdx = afterInvoke.search(/<\s*\/\s*invoke\s*>/i);
+            // </invoke> 없이 스트림이 끝난 경우도 처리 (응답 끝까지를 inner로)
+            const inner = closeIdx >= 0 ? afterInvoke.slice(0, closeIdx) : afterInvoke;
+            const pathMatch = inner.match(param('path'));
+            const descMatch = inner.match(param('description'));
+            const contentMatch = inner.match(param('CONTENT'));
+            if (pathMatch && contentMatch) {
+                const path = pathMatch[1].replace(/<[^>]+>/g, '').trim();
+                const description = descMatch ? descMatch[1].replace(/<[^>]+>/g, '').trim() : '';
+                let content = contentMatch[1].trim();
+                operations.push({
+                    type: 'edit',
+                    path,
+                    description,
+                    content,
+                });
+            }
+        }
+
+        // 위에서 못 찾았고, 응답이 ```...``` 블록 하나로 감싸진 경우 한 번 더 시도
+        if (operations.length === 0 && /<invoke\s+name=["']edit["']/i.test(raw)) {
+            const m = raw.match(/```\w*\s*\n([\s\S]*?)```/);
+            if (m && /<parameter\s+name=["']path["']/i.test(m[1])) {
+                const innerRaw = m[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+                const inv = /<invoke\s+name=["']edit["']\s*>/gi.exec(innerRaw);
+                if (inv) {
+                    const afterInvoke = innerRaw.slice(inv.index + inv[0].length);
+                    const closeIdx = afterInvoke.search(/<\s*\/\s*invoke\s*>/i);
+                    const inner = closeIdx >= 0 ? afterInvoke.slice(0, closeIdx) : afterInvoke;
+                    const param = (name: string) => new RegExp(`<parameter\\s+name=["']${name}["']\\s*[^>]*>([\\s\\S]*?)<\\/parameter>`, 'i');
+                    const pathMatch = inner.match(param('path'));
+                    const descMatch = inner.match(param('description'));
+                    const contentMatch = inner.match(param('CONTENT'));
+                    if (pathMatch && contentMatch) {
+                        const path = pathMatch[1].replace(/<[^>]+>/g, '').trim();
+                        const description = descMatch ? descMatch[1].replace(/<[^>]+>/g, '').trim() : '';
+                        operations.push({ type: 'edit', path, description, content: contentMatch[1].trim() });
+                    }
+                }
+            }
+        }
+
         // 개선된 파싱: FILE_OPERATION 블록을 더 정확하게 찾기
         // END_OPERATION 태그를 명시적으로 찾되, 없으면 다음 FILE_OPERATION 전까지 또는 문자열 끝까지
-        const fileOpStartPattern = /<<<FILE_OPERATION>>>/gi;
-        const fileOpEndPattern = /<<<END_OPERATION>>>/gi;
-        
-        let startMatch: RegExpExecArray | null;
-        
-        // 모든 FILE_OPERATION 시작 위치를 먼저 찾기 (lastIndex 문제 방지)
         const startPositions: number[] = [];
         const startRegex = /<<<FILE_OPERATION>>>/gi;
         let match;
-        while ((match = startRegex.exec(response)) !== null) {
+        while ((match = startRegex.exec(raw)) !== null) {
             startPositions.push(match.index);
         }
         
@@ -957,11 +1001,11 @@ export function helper() {
             const blockStart = startPositions[i] + '<<<FILE_OPERATION>>>'.length;
             
             // 다음 FILE_OPERATION 위치 찾기
-            const nextStartPos = i < startPositions.length - 1 ? startPositions[i + 1] : response.length;
+            const nextStartPos = i < startPositions.length - 1 ? startPositions[i + 1] : raw.length;
             
             // END_OPERATION 태그 찾기 (blockStart부터 nextStartPos 전까지)
-            const searchEnd = Math.min(nextStartPos, response.length);
-            const searchText = response.substring(blockStart, searchEnd);
+            const searchEnd = Math.min(nextStartPos, raw.length);
+            const searchText = raw.substring(blockStart, searchEnd);
             const endRegex = /<<<END_OPERATION>>>/gi;
             const endMatch = endRegex.exec(searchText);
             
@@ -974,7 +1018,7 @@ export function helper() {
                 blockEnd = nextStartPos;
             }
             
-            const block = response.substring(blockStart, blockEnd);
+            const block = raw.substring(blockStart, blockEnd);
             
             const typeMatch = block.match(/TYPE:\s*(create|edit|delete|read)/i);
             const pathMatch = block.match(/PATH:\s*[`'"]?([^`'"\n\r]+)[`'"]?/i);
@@ -1053,12 +1097,12 @@ export function helper() {
             }
         }
 
-        // 자동 실행 코드 제거 및 백틱 정리 (테스트 파일 등)
+        // 자동 실행 코드 제거, 백틱 정리, 제어문자 표기 제거
         for (const op of operations) {
             if (op.content && (op.type === 'create' || op.type === 'edit')) {
                 op.content = this.removeAutoExecutionCode(op.content, op.path);
-                // 코드 끝에 남아있는 백틱 제거 (안전장치)
                 op.content = this.removeTrailingBackticks(op.content);
+                op.content = this.removeControlCharacterArtifacts(op.content);
             }
         }
 
@@ -1075,6 +1119,36 @@ export function helper() {
         // 여러 줄의 백틱 제거
         cleaned = cleaned.replace(/(\n```+\s*)+$/m, '');
         return cleaned.trimEnd();
+    }
+
+    /** AI 응답에 붙는 제어문자 표기(<ctrl46> 등) 및 실제 제어문자 제거 */
+    private removeControlCharacterArtifacts(content: string): string {
+        if (!content) return content;
+        let cleaned = content;
+        // VS Code 등에서 제어문자를 표시할 때 쓰는 <ctrlNN> 형태 완전 제거
+        cleaned = cleaned.replace(/<ctrl\d+>/gi, ''); // 모든 <ctrl숫자> 제거
+        cleaned = cleaned.replace(/\s*<ctrl\d+>\s*/gi, ''); // 공백 포함 제거
+        // 실제 ASCII 제어문자 제거 (줄바꿈\n, 탭\t, 캐리지리턴\r 제외)
+        cleaned = cleaned.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
+        // 연속된 빈 줄 정리
+        cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+        return cleaned.trimEnd();
+    }
+
+    /** Append 시: 파일 끝과 겹치는 스니펫 앞부분 제거 (중복 줄 방지) */
+    private stripOverlappingPrefix(existingEnd: string, snippet: string): string {
+        if (!snippet.trim()) return snippet;
+        const normalize = (line: string) => line.trim().replace(/`/g, '').trim();
+        const el = existingEnd.trimEnd().split(/\r?\n/);
+        const sl = snippet.trim().split(/\r?\n/);
+        let stripCount = 0;
+        for (let k = 1; k <= Math.min(el.length, sl.length); k++) {
+            const existingTail = el.slice(-k).map(normalize).join('\n');
+            const snippetHead = sl.slice(0, k).map(normalize).join('\n');
+            if (existingTail === snippetHead) stripCount = k;
+        }
+        const rest = sl.slice(stripCount).join('\n').trim();
+        return rest;
     }
 
     /** 테스트 파일 등에서 자동 실행 코드(run(), main() 등) 제거 */
@@ -1158,8 +1232,11 @@ export function helper() {
                                     const replacePart = parts[1];
 
                                     if (searchPart && replacePart) {
-                                        const trimmedSearch = searchPart.trim();
-                                        const trimmedReplace = replacePart.trim();
+                                        let trimmedSearch = searchPart.trim();
+                                        let trimmedReplace = replacePart.trim();
+                                        // 제어문자 제거
+                                        trimmedSearch = this.removeControlCharacterArtifacts(trimmedSearch);
+                                        trimmedReplace = this.removeControlCharacterArtifacts(trimmedReplace);
                                         // SEARCH와 REPLACE가 동일하면 스킵 (불필요한 변경 방지)
                                         if (trimmedSearch === trimmedReplace) {
                                             continue;
@@ -1199,8 +1276,19 @@ export function helper() {
                                     throw new Error(`No matching SEARCH blocks found in ${op.path}`);
                                 }
                             } else {
-                                const docLines = currentContent.split('\n').length;
-                                edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)), op.content);
+                                // CONTENT가 SEARCH/REPLACE가 아니면: 전체 교체 vs 끝에 추가 구분
+                                const opLines = op.content.split(/\r?\n/).length;
+                                const existingLines = currentContent.split(/\r?\n/).length;
+                                const isLikelySnippet = opLines <= 15 && existingLines > opLines * 2;
+                                let contentToApply: string;
+                                if (isLikelySnippet) {
+                                    const toAppend = this.stripOverlappingPrefix(currentContent, op.content);
+                                    contentToApply = toAppend ? currentContent.trimEnd() + '\n\n' + toAppend : currentContent;
+                                } else {
+                                    contentToApply = op.content;
+                                }
+                                const docLines = contentToApply.split('\n').length;
+                                edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(existingLines + 1, 0)), contentToApply);
                                 successCount++;
                             }
                         }
@@ -1454,7 +1542,9 @@ export function helper() {
             if (operation.type === 'create') {
                 const emptyUri = vscode.Uri.parse('untitled:empty');
                 const proposedUri = vscode.Uri.parse(`tokamak-preview:${operation.path}`);
-                const proposedContent = operation.content || '';
+                let proposedContent = operation.content || '';
+                // 제어문자 제거 (diff 미리보기용)
+                proposedContent = this.removeControlCharacterArtifacts(proposedContent);
 
                 const provider = new (class implements vscode.TextDocumentContentProvider {
                     provideTextDocumentContent(): string { return proposedContent; }
@@ -1477,8 +1567,12 @@ export function helper() {
                             if (!block.trim()) continue;
                             const searchParts = block.split('=======');
                             if (searchParts.length !== 2) continue;
-                            const searchContent = searchParts[0].split('<<<<<<< SEARCH')[1]?.trim();
-                            const replaceContent = searchParts[1]?.trim();
+                            let searchContent = searchParts[0].split('<<<<<<< SEARCH')[1]?.trim();
+                            let replaceContent = searchParts[1]?.trim();
+                            // 제어문자 제거
+                            if (searchContent) searchContent = this.removeControlCharacterArtifacts(searchContent);
+                            if (replaceContent) replaceContent = this.removeControlCharacterArtifacts(replaceContent);
+                            
                             if (searchContent !== undefined && replaceContent !== undefined) {
                                 // SEARCH와 REPLACE가 동일하면 스킵 (불필요한 변경 방지)
                                 if (searchContent === replaceContent) {
@@ -1503,6 +1597,26 @@ export function helper() {
                             }
                         }
                         proposedContent = result;
+                    } else {
+                        // SEARCH/REPLACE가 없을 때: 짧은 내용이면 끝에 추가로 해석 (전체 덮어쓰기 방지)
+                        const opLines = (operation.content || '').split(/\r?\n/).length;
+                        const existingLines = existingContent.split(/\r?\n/).length;
+                        if (opLines <= 15 && existingLines > opLines * 2) {
+                            const toAppend = this.stripOverlappingPrefix(existingContent, operation.content || '');
+                            proposedContent = toAppend
+                                ? existingContent.trimEnd() + '\n\n' + toAppend
+                                : existingContent;
+                        }
+                    }
+                    
+                    // 최종적으로 제어문자 제거 (diff 미리보기용)
+                    proposedContent = this.removeControlCharacterArtifacts(proposedContent);
+
+                    // 변경 전/후가 동일하면 diff 창을 열지 않음 (Apply 전에 이미 적용됐거나 내용 동일 시)
+                    const normalize = (s: string) => s.replace(/\r\n|\r/g, '\n').trim();
+                    if (normalize(existingContent) === normalize(proposedContent)) {
+                        vscode.window.showInformationMessage(`[EDIT] ${operation.path}: 적용 예정 내용이 현재 파일과 동일합니다. Diff를 건너뜁니다.`);
+                        return;
                     }
 
                     const provider = new (class implements vscode.TextDocumentContentProvider {
@@ -1679,79 +1793,8 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
                 // In agent or ask mode, parse file operations
                 const operations = this.parseFileOperations(fullResponse);
                 
-                // Agent 모드인 경우 처리
-                if (this.currentMode === 'agent' && this.agentEngine) {
-                    // FILE_OPERATION이 있으면 직접 실행
-                    if (operations.length > 0) {
-                    // 각 FILE_OPERATION을 step으로 변환하고 직접 실행 (checkpoint 생성 포함)
-                    for (let i = 0; i < operations.length; i++) {
-                        const op = operations[i];
-                        
-                        // Checkpoint 생성 (step 실행 전) - 설정이 활성화된 경우에만
-                        let checkpointId: string | undefined;
-                        const checkpointManager = this.agentEngine.getCheckpointManager();
-                        if (checkpointManager && isCheckpointsEnabled()) {
-                            try {
-                                const stepDescription = `${op.type.toUpperCase()}: ${op.path}${op.description ? ` - ${op.description}` : ''}`;
-                                console.log(`[ChatPanel] Creating checkpoint before ${op.type}: ${op.path}`);
-                                checkpointId = await checkpointManager.createCheckpoint(
-                                    stepDescription,
-                                    `step-${i}`,
-                                    [], // Plan 없음
-                                    {
-                                        state: 'Executing',
-                                        currentStepIndex: i,
-                                    }
-                                );
-                                console.log(`[ChatPanel] Checkpoint created: ${checkpointId}`);
-                                if (checkpointId) {
-                                    // Checkpoint 생성 콜백 호출 (UI 업데이트용)
-                                    this.panel.webview.postMessage({ command: 'checkpointCreated', checkpointId });
-                                }
-                            } catch (error) {
-                                console.error('[ChatPanel] Failed to create checkpoint:', error);
-                            }
-                        }
-                        
-                        // 파일 작업 실행
-                        try {
-                            const action: any = {
-                                type: op.type === 'create' || op.type === 'edit' ? 'write' : op.type === 'delete' ? 'delete' : 'read',
-                                payload: op.type === 'delete' || op.type === 'read' 
-                                    ? { path: op.path }
-                                    : { path: op.path, content: op.content || '' }
-                            };
-                            
-                            const executor = new Executor();
-                            const result = await executor.execute(action);
-                            console.log(`[ChatPanel] Executed ${op.type}: ${op.path} - ${result}`);
-                            
-                            // 성공 메시지 표시
-                            this.panel.webview.postMessage({
-                                command: 'addMessage',
-                                role: 'assistant',
-                                content: `✅ ${op.type === 'create' ? 'Created' : op.type === 'edit' ? 'Updated' : 'Deleted'}: \`${op.path}\``
-                            });
-                        } catch (error) {
-                            console.error(`[ChatPanel] Failed to execute ${op.type}: ${op.path}`, error);
-                            this.panel.webview.postMessage({
-                                command: 'addMessage',
-                                role: 'assistant',
-                                content: `❌ Failed to ${op.type} \`${op.path}\`: ${error instanceof Error ? error.message : 'Unknown error'}`
-                            });
-                        }
-                    }
-                    
-                    // Checkpoints 목록 새로고침
-                    await this.getCheckpoints();
-                    
-                    // Agent 모드에서는 파일이 자동으로 생성되므로 Pending Operations로 표시하지 않음
-                    this.pendingOperations = [];
-                    this.panel.webview.postMessage({ command: 'operationsCleared' });
-                    }
-                    // FILE_OPERATION이 없으면 일반 채팅 응답으로 처리 (Plan 자동 생성하지 않음)
-                    // 사용자가 명시적으로 Plan을 요청하거나 복잡한 작업을 요청할 때만 AgentEngine 사용
-                }
+                // Agent 모드도 Ask와 동일: 파일 작업은 사용자가 "Apply Changes"를 누를 때만 적용.
+                // (이전에는 Agent에서 응답 직후 자동 실행해 Apply 전에 이미 변경된 것처럼 보이는 문제가 있어 제거함)
 
                 // Handle READ operations automatically
                 const readOps = operations.filter(op => op.type === 'read');
