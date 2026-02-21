@@ -152,6 +152,25 @@
 
 ---
 
+### 📎 참고: Cline 파일 편집 방식 (정리)
+
+[Cline](https://github.com/cline/cline)은 파일 편집을 **도구를 두 개로 분리**해서 애매함을 없앤다.
+
+| 도구 | 파라미터 | 의미 |
+|------|----------|------|
+| **write_to_file** | `path` + `content` | **전체 파일 덮어쓰기**. 새로 만들기 또는 파일 전체 교체. |
+| **replace_in_file** | `path` + `diff` | **부분 수정**. 기존 파일 내용 + `diff`(SEARCH/REPLACE 블록)로 새 내용 계산. |
+
+- **ApplyPatch**: 별도로 `APPLY_PATCH` 도구로 unified-diff 스타일 패치(ADD/UPDATE/DELETE 마커)를 파싱해 여러 파일 변경을 한 번에 처리한다.
+- **흐름**: Diff 뷰 열기 → 제안 내용 스트리밍/표시 → 사용자 Approve/Reject → Approve 시에만 `saveChanges()`로 디스크 반영.
+
+**Tokamak에 적용할 때 참고**:
+- **부분 수정**(끝에 추가, 처음에 추가, 중간 수정)은 **반드시 SEARCH/REPLACE**로만 처리하는 것이 안전하다. CONTENT에 SEARCH/REPLACE가 없으면 “전체 교체”로만 해석하는 현재 동작을 유지하는 것이 좋다.
+- 필요하면 프롬프트/도구 정의에서 **write_to_file** vs **replace_in_file**처럼 “전체 쓰기”와 “diff 기반 수정”을 명시적으로 구분해, 모델이 형식을 잘못 쓰는 경우를 줄일 수 있다.
+- Cline도 SEARCH 블록 매칭 실패, 모델별 포맷 오류 등 이슈가 있어 이슈 트래커에 보고된 바 있다. 우리도 SEARCH/REPLACE 규칙을 문서화하고, 실패 시 재시도/에러 메시지를 명확히 하는 방향이 유리하다.
+
+---
+
 ## 🚀 Phase 3: 고도화 (장기)
 
 ### ✅ 3.1 멀티 파일 동시 편집 지원

@@ -125,26 +125,24 @@ export function streamChatCompletion(
             }
         }
 
-        // 스트림 종료 후 수집된 tool_calls가 있으면 XML 형태로 한 번 더 yield (parseFileOperations에서 인식하도록)
+        // 스트림 종료 후 수집된 tool_calls가 있으면 XML 형태로 yield (Cline 스타일: write_to_file / replace_in_file / edit)
         if (toolCallsAccum.length > 0) {
             for (const t of toolCallsAccum) {
-                if (!t.name || t.name !== 'edit') continue;
+                const name = t.name;
+                if (!name || !['edit', 'write_to_file', 'replace_in_file', 'prepend', 'append'].includes(name)) continue;
                 try {
                     const parsed = JSON.parse(t.args) as Record<string, string>;
                     const path = parsed.path ?? '';
-                    const desc = parsed.description ?? '';
-                    const body = parsed.CONTENT ?? parsed.content ?? '';
-                    if (path && body) {
-                        const xml = [
-                            '<invoke name="edit">',
-                            `<parameter name="path">${path}</parameter>`,
-                            `<parameter name="description">${desc}</parameter>`,
-                            `<parameter name="CONTENT">${body}</parameter>`,
-                            '<parameter name="OPERATION_TYPE">edit</parameter>',
-                            '</invoke>',
-                        ].join('\n');
-                        yield '\n' + xml;
+                    // path가 없는 호출은 무시 (단, LLM에 따라 경로를 다르게 전달할 수도 있지만, 현재는 path 필수)
+                    if (!path) continue;
+
+                    const xmlLines = [`<invoke name="${name}">`];
+                    for (const [key, value] of Object.entries(parsed)) {
+                        xmlLines.push(`<parameter name="${key}">${value}</parameter>`);
                     }
+                    xmlLines.push('</invoke>');
+
+                    yield '\n' + xmlLines.join('\n');
                 } catch {
                     // arguments가 JSON이 아니면 무시
                 }

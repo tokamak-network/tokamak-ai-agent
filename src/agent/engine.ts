@@ -28,7 +28,7 @@ export class AgentEngine {
     constructor(context: AgentContext) {
         this.context = context;
         this.contextManager = new ContextManager(this.executor);
-        
+
         // ExtensionContext가 있고 checkpoint 기능이 활성화되어 있으면 CheckpointManager 초기화
         if (context.extensionContext && isCheckpointsEnabled()) {
             this.checkpointManager = new CheckpointManager(context.extensionContext);
@@ -223,7 +223,7 @@ ${stepContext}
 위 단계를 실행하기 위한 **JSON Action**을 생성해주세요.
 
 **단일 파일 작업**:
-{ "type": "write", "payload": { "path": "...", "content": "..." } }
+{ "type": "write", "payload": { "path": "...", "content": "전체_내용_또는_SEARCH_REPLACE_블록" } }
 
 **여러 파일 동시 작업** (권장):
 여러 파일을 함께 생성/수정해야 하는 경우, multi_write를 사용하세요:
@@ -232,9 +232,8 @@ ${stepContext}
   "payload": {
     "atomic": true,
     "operations": [
-      { "operation": "create", "path": "file1.ts", "content": "..." },
-      { "operation": "edit", "path": "file2.ts", "content": "..." },
-      { "operation": "create", "path": "file3.ts", "content": "..." }
+      { "operation": "create", "path": "file1.ts", "content": "새_파일_전체_코드..." },
+      { "operation": "edit", "path": "file2.ts", "content": "<<<<<<< SEARCH\\n수정할_기존_코드\\n=======\\n새롭게_바뀔_코드\\n>>>>>>> REPLACE" }
     ]
   }
 }
@@ -249,7 +248,14 @@ ${stepContext}
 **중요 지침**:
 1. 여러 관련 파일(컴포넌트, 테스트, 타입 등)을 함께 생성해야 할 때는 multi_write를 사용하세요.
 2. 파일 간 의존성이 있는 경우(import/export) 모든 파일을 한 번에 처리하세요.
-3. 내용이 길 경우 반드시 **SEARCH/REPLACE** 형식을 사용하세요.
+3. **[치명적 주의] 기존 파일을 수정할 때는 절대 바꿀 부분만 덩그러니 작성하거나 전체를 덮어쓰지 말고, 반드시 SEARCH/REPLACE 블록을 사용하세요!**
+   - 이 블록 없이 새로운 코드 스니펫만 작성하면, 기존 코드가 몽땅 삭제되고 해당 스니펫만 파일에 남게 됩니다!
+   - 작성 예시 (\\n 등 이스케이프에 주의하세요):
+   <<<<<<< SEARCH
+   (원본 파일에 있는 정확히 일치하는 기존 코드)
+   =======
+   (수정되어 적용될 새로운 코드)
+   >>>>>>> REPLACE
 4. operation은 "create", "edit", "delete" 중 하나입니다.
 5. atomic: true로 설정하면 모든 작업이 성공해야 적용되고, 하나라도 실패하면 전체 롤백됩니다.
 6. **터미널 명령 실행**: 파일 작업 외에 의존성 설치, 테스트, 빌드 등이 필요한 경우 run 액션을 사용하세요.
@@ -290,16 +296,16 @@ ${stepContext}
                 if (action.type === 'run' && this.context.onMessage) {
                     this.context.onMessage('assistant', `🔧 Executing: \`${action.payload.command}\``);
                 }
-                
+
                 const result = await this.executor.execute(action);
                 step.result = result;
-                
+
                 // 실행 결과를 메시지로 표시
                 if (this.context.onMessage) {
-                    const resultPreview = result.length > 500 
+                    const resultPreview = result.length > 500
                         ? result.substring(0, 500) + '\n... (truncated)'
                         : result;
-                    
+
                     if (action.type === 'run') {
                         // 터미널 명령 결과를 코드 블록으로 표시
                         this.context.onMessage('assistant', `\`\`\`\n${resultPreview}\n\`\`\``);

@@ -59,11 +59,14 @@ const BUILTIN_SKILLS: SlashCommand[] = [
     },
 ];
 
+/** Cline 스타일 + prepend/append: 처음/끝에만 추가할 때 다른 코드 건드리지 않음 */
 interface FileOperation {
-    type: 'create' | 'edit' | 'delete' | 'read';
+    type: 'create' | 'edit' | 'delete' | 'read' | 'write_full' | 'replace' | 'prepend' | 'append';
     path: string;
     content?: string;
     description: string;
+    search?: string;
+    replace?: string;
 }
 
 interface ChatSession {
@@ -163,16 +166,16 @@ export class ChatPanel {
             case 'selectMode':
                 this.currentMode = message.mode;
                 this.saveChatHistory();
-                this.panel.webview.postMessage({ 
-                    command: 'modeChanged', 
+                this.panel.webview.postMessage({
+                    command: 'modeChanged',
                     mode: this.currentMode,
                     checkpointsEnabled: isCheckpointsEnabled()
                 });
                 break;
             case 'ready':
                 this.updateModelList();
-                this.panel.webview.postMessage({ 
-                    command: 'modeChanged', 
+                this.panel.webview.postMessage({
+                    command: 'modeChanged',
                     mode: this.currentMode,
                     checkpointsEnabled: isCheckpointsEnabled()
                 });
@@ -197,8 +200,8 @@ export class ChatPanel {
                     this.chatHistory = session.messages;
                     this.currentMode = session.mode;
                     this.panel.webview.postMessage({ command: 'clearMessages' });
-                    this.panel.webview.postMessage({ 
-                        command: 'modeChanged', 
+                    this.panel.webview.postMessage({
+                        command: 'modeChanged',
                         mode: this.currentMode,
                         checkpointsEnabled: isCheckpointsEnabled()
                     });
@@ -410,15 +413,15 @@ export class ChatPanel {
                 date: new Date(session.timestamp).toISOString(),
                 messages: session.messages.map(msg => ({
                     role: msg.role,
-                    content: typeof msg.content === 'string' ? msg.content : 
-                             Array.isArray(msg.content) ? msg.content.map((item: any) => 
-                                 item.type === 'text' ? item.text : item
-                             ).join('') : JSON.stringify(msg.content)
+                    content: typeof msg.content === 'string' ? msg.content :
+                        Array.isArray(msg.content) ? msg.content.map((item: any) =>
+                            item.type === 'text' ? item.text : item
+                        ).join('') : JSON.stringify(msg.content)
                 }))
             };
 
             const jsonContent = JSON.stringify(exportData, null, 2);
-            
+
             // Show save dialog
             const uri = await vscode.window.showSaveDialog({
                 defaultUri: vscode.Uri.file(`tokamak-chat-${session.title.replace(/[^a-z0-9]/gi, '-')}-${sessionId}.json`),
@@ -878,39 +881,54 @@ Format your response as:
 ${projectStructure}
 ${projectKnowledge}
 
-You can perform file operations. When you need to create, edit, or delete files, output them in this EXACT format:
+You can perform file operations (Cline-style: two clear options for edits).
 
 <<<FILE_OPERATION>>>
-TYPE: create|edit|delete|read
+TYPE: create|write_full|replace|prepend|append|delete|read
 PATH: relative/path/to/file
 DESCRIPTION: Brief description of the change
 CONTENT:
 \`\`\`
-actual file content here (for create/edit only)
+content or diff (see rules below)
 \`\`\`
 <<<END_OPERATION>>>
 
+**Add only at start or end (nothing else is modified):**
+- **prepend**: Add CONTENT at the very beginning of the file. CONTENT = only the text to add (e.g. "안녕하세요"). Use for: "처음에 X 넣어줘", "맨 앞에 추가", "add X at the beginning".
+- **append**: Add CONTENT at the very end of the file. CONTENT = only the text to add. Use for: "끝에 X 넣어줘", "맨 뒤에 추가", "add X at the end".
+
+**Other edits:**
+- **write_full**: Replace the ENTIRE file. CONTENT = complete new file. Only when user asks to replace/rewrite the whole file. (Do not use this just to edit a small part!)
+- **edit** or **replace**: Change part of the file. You MUST provide exactly the code to find and the code to replace it with.
+
+Rules for 'edit' or 'replace':
+- Do NOT use the old \`<<<<<<< SEARCH\` format. Instead, you MUST use two separate parameters: \`SEARCH:\` (or \`<parameter name="search">\`) for the exact existing code, and \`REPLACE:\` (or \`<parameter name="replace">\`) for the new code.
+- Provide enough context lines in the SEARCH block to make it uniquely identifiable.
+- The SEARCH string must exactly match the file content, including all whitespace and indentation.
+- If you use \`CONTENT:\` for an edit, we will try to fuzzy-match it explicitly to surrounding lines.
+- 🔴 IMPORTANT FOR TEXT REPLACEMENT 🔴: If the user asks you to "change word A to B" or "rename X to Y" in the middle of a file, you CANNOT just send \`CONTENT: Y\`. You MUST use explicit \`SEARCH: A\` and \`REPLACE: B\` so the system knows what to overwrite. Do NOT use \`CONTENT\` for text replacements!
+
 Rules:
-- For 'create', provide the COMPLETE file content.
-- For 'edit', provide one or more SEARCH/REPLACE blocks. DO NOT provide the complete file content unless necessary.
-- For 'read', provide the PATH only, and I will show you the content in the next turn.
+- **"처음에/맨 앞에 X 넣어줘"** → TYPE: prepend, CONTENT: X only.
+- **"끝에/맨 뒤에 X 넣어줘"** → TYPE: append, CONTENT: X only.
+- For 'create', CONTENT = complete file. For 'write_full', CONTENT = complete file. For 'read', PATH only.
 
-SEARCH/REPLACE Block Format:
-<<<<<<< SEARCH
-[exact code to find]
-=======
-[new code to replace with]
->>>>>>> REPLACE
+Example Edit Format:
+<<<FILE_OPERATION>>>
+TYPE: edit
+PATH: src/utils/helper.ts
+DESCRIPTION: Update return value
+SEARCH:
+\`\`\`typescript
+  return 'hello';
+\`\`\`
+REPLACE:
+\`\`\`typescript
+  return 'world';
+\`\`\`
+<<<END_OPERATION>>>
 
-Rules for SEARCH/REPLACE:
-1. The SEARCH part must EXACTLY match the code in the file, including indentation and spacing.
-2. Provide enough context in the SEARCH block to make it unique.
-3. You can have multiple SEARCH/REPLACE blocks in one CONTENT section.
-4. **CRITICAL: If SEARCH and REPLACE content are identical, DO NOT create a SEARCH/REPLACE block. Skip that change entirely.**
-5. **CRITICAL: DO NOT delete existing code unless explicitly requested. If REPLACE is empty or much shorter than SEARCH, this will be rejected.**
-6. **CRITICAL: When writing test files, DO NOT include auto-execution code at the end (e.g. run(), main(), if __name__ == '__main__', etc.). Test files should only contain test definitions, not execution code.**
-7. Always explain what you're doing before the operations.
-- Be careful and precise with file paths.
+- Always explain what you're doing before the operations.
 - Ask for confirmation if the task is ambiguous.
 
 Example:
@@ -939,28 +957,47 @@ export function helper() {
         // HTML 이스케이프 복원 (웹뷰 등에서 &lt; &gt; 로 올 수 있음)
         let raw = response.replace(/&lt;/g, '<').replace(/&gt;/g, '>');
 
-        // minimax 등 tool_call 형식: <invoke name="edit"> ... <parameter name="path">, CONTENT 등
+        // minimax 등 tool_call: write_to_file (전체 쓰기), replace_in_file (부분 수정), edit (하위 호환)
         const param = (name: string) => new RegExp(`<parameter\\s+name=["']${name}["']\\s*[^>]*>([\\s\\S]*?)<\\/parameter>`, 'i');
-        const invokeStart = /<invoke\s+name=["']edit["']\s*>/gi;
-        let invokeMatch: RegExpExecArray | null;
-        while ((invokeMatch = invokeStart.exec(raw)) !== null) {
-            const afterInvoke = raw.slice(invokeMatch.index + invokeMatch[0].length);
-            const closeIdx = afterInvoke.search(/<\s*\/\s*invoke\s*>/i);
-            // </invoke> 없이 스트림이 끝난 경우도 처리 (응답 끝까지를 inner로)
-            const inner = closeIdx >= 0 ? afterInvoke.slice(0, closeIdx) : afterInvoke;
+        const parseInvoke = (inner: string, toolType: 'write_full' | 'replace' | 'edit' | 'prepend' | 'append') => {
             const pathMatch = inner.match(param('path'));
             const descMatch = inner.match(param('description'));
-            const contentMatch = inner.match(param('CONTENT'));
-            if (pathMatch && contentMatch) {
+            const contentMatch = inner.match(param('CONTENT')) ?? inner.match(param('content'));
+            const diffMatch = inner.match(param('diff'));
+            const body = contentMatch?.[1]?.trim() ?? diffMatch?.[1]?.trim();
+
+            const searchMatch = inner.match(param('search')) ?? inner.match(param('search_text'));
+            const replaceMatch = inner.match(param('replace')) ?? inner.match(param('replace_text'));
+            const searchCode = searchMatch?.[1]?.trim();
+            const replaceCode = replaceMatch?.[1]?.trim();
+
+            if (pathMatch && (body || (searchCode && replaceCode))) {
                 const path = pathMatch[1].replace(/<[^>]+>/g, '').trim();
                 const description = descMatch ? descMatch[1].replace(/<[^>]+>/g, '').trim() : '';
-                let content = contentMatch[1].trim();
                 operations.push({
-                    type: 'edit',
+                    type: toolType,
                     path,
                     description,
-                    content,
+                    content: body,
+                    search: searchCode,
+                    replace: replaceCode
                 });
+            }
+        };
+        const invokeNames: [RegExp, 'write_full' | 'replace' | 'edit' | 'prepend' | 'append'][] = [
+            [/<invoke\s+name=["']write_to_file["']\s*>/gi, 'write_full'],
+            [/<invoke\s+name=["']replace_in_file["']\s*>/gi, 'replace'],
+            [/<invoke\s+name=["']prepend["']\s*>/gi, 'prepend'],
+            [/<invoke\s+name=["']append["']\s*>/gi, 'append'],
+            [/<invoke\s+name=["']edit["']\s*>/gi, 'edit'],
+        ];
+        for (const [invokeRe, toolType] of invokeNames) {
+            let m: RegExpExecArray | null;
+            while ((m = invokeRe.exec(raw)) !== null) {
+                const afterInvoke = raw.slice(m.index + m[0].length);
+                const closeIdx = afterInvoke.search(/<\s*\/\s*invoke\s*>/i);
+                const inner = closeIdx >= 0 ? afterInvoke.slice(0, closeIdx) : afterInvoke;
+                parseInvoke(inner, toolType);
             }
         }
 
@@ -977,11 +1014,25 @@ export function helper() {
                     const param = (name: string) => new RegExp(`<parameter\\s+name=["']${name}["']\\s*[^>]*>([\\s\\S]*?)<\\/parameter>`, 'i');
                     const pathMatch = inner.match(param('path'));
                     const descMatch = inner.match(param('description'));
-                    const contentMatch = inner.match(param('CONTENT'));
-                    if (pathMatch && contentMatch) {
+                    const contentMatch = inner.match(param('CONTENT')) ?? inner.match(param('content'));
+                    const searchMatch = inner.match(param('search')) ?? inner.match(param('search_text'));
+                    const replaceMatch = inner.match(param('replace')) ?? inner.match(param('replace_text'));
+
+                    const body = contentMatch?.[1]?.trim();
+                    const searchCode = searchMatch?.[1]?.trim();
+                    const replaceCode = replaceMatch?.[1]?.trim();
+
+                    if (pathMatch && (body || (searchCode && replaceCode))) {
                         const path = pathMatch[1].replace(/<[^>]+>/g, '').trim();
                         const description = descMatch ? descMatch[1].replace(/<[^>]+>/g, '').trim() : '';
-                        operations.push({ type: 'edit', path, description, content: contentMatch[1].trim() });
+                        operations.push({
+                            type: 'edit',
+                            path,
+                            description,
+                            content: body,
+                            search: searchCode,
+                            replace: replaceCode
+                        });
                     }
                 }
             }
@@ -995,20 +1046,20 @@ export function helper() {
         while ((match = startRegex.exec(raw)) !== null) {
             startPositions.push(match.index);
         }
-        
-            // 각 시작 위치에서 블록 파싱
+
+        // 각 시작 위치에서 블록 파싱
         for (let i = 0; i < startPositions.length; i++) {
             const blockStart = startPositions[i] + '<<<FILE_OPERATION>>>'.length;
-            
+
             // 다음 FILE_OPERATION 위치 찾기
             const nextStartPos = i < startPositions.length - 1 ? startPositions[i + 1] : raw.length;
-            
+
             // END_OPERATION 태그 찾기 (blockStart부터 nextStartPos 전까지)
             const searchEnd = Math.min(nextStartPos, raw.length);
             const searchText = raw.substring(blockStart, searchEnd);
             const endRegex = /<<<END_OPERATION>>>/gi;
             const endMatch = endRegex.exec(searchText);
-            
+
             let blockEnd: number;
             if (endMatch) {
                 // END_OPERATION 태그가 있으면 그 전까지 (blockStart 기준으로 인덱스 조정)
@@ -1017,89 +1068,82 @@ export function helper() {
                 // END_OPERATION이 없으면 다음 FILE_OPERATION 전까지 또는 문자열 끝까지
                 blockEnd = nextStartPos;
             }
-            
+
             const block = raw.substring(blockStart, blockEnd);
-            
-            const typeMatch = block.match(/TYPE:\s*(create|edit|delete|read)/i);
+
+            const typeMatch = block.match(/TYPE:\s*(create|edit|delete|read|write_full|replace|prepend|append)/i);
             const pathMatch = block.match(/PATH:\s*[`'"]?([^`'"\n\r]+)[`'"]?/i);
             const descMatch = block.match(/DESCRIPTION:\s*(.+?)(?:\nCONTENT:|$)/is);
 
-            // CONTENT 파싱 개선: 백틱 코드 블록을 더 정확하게 처리
-            let content: string | undefined;
-            
-            // CONTENT: 다음 부분 찾기
-            const contentStartMatch = block.match(/CONTENT:\s*/i);
-            if (contentStartMatch) {
-                const contentStart = contentStartMatch.index! + contentStartMatch[0].length;
-                let contentText = block.substring(contentStart).trim();
-                
-                // 백틱 코드 블록이 있는지 확인 (```로 시작)
-                if (contentText.startsWith('```')) {
-                    // 언어 지정 부분 건너뛰기 (예: ```markdown, ```typescript 등)
-                    const firstNewline = contentText.indexOf('\n');
+            const extractField = (fieldName: string): string | undefined => {
+                const startMatch = block.match(new RegExp(`${fieldName}:\\s*`, 'i'));
+                if (!startMatch) return undefined;
+
+                const startIdx = startMatch.index! + startMatch[0].length;
+                // Find next possible field marker or end of block
+                let endIdx = block.length;
+                const nextFieldMatch = block.substring(startIdx).match(/\n(CONTENT|SEARCH|REPLACE|DESCRIPTION|PATH|TYPE):\s*/i);
+                if (nextFieldMatch) {
+                    endIdx = startIdx + nextFieldMatch.index!;
+                }
+
+                let text = block.substring(startIdx, endIdx).trim();
+
+                if (text.startsWith('```')) {
+                    const firstNewline = text.indexOf('\n');
                     if (firstNewline > 0) {
-                        contentText = contentText.substring(firstNewline + 1);
+                        text = text.substring(firstNewline + 1);
                     } else {
-                        // 줄바꿈이 없으면 ```만 제거
-                        contentText = contentText.substring(3).trim();
+                        text = text.substring(3).trim();
                     }
-                    
-                    // 닫는 백틱 찾기: 줄 시작 부분의 ``` 찾기 (코드 내부의 ```와 구분)
+
                     let lastBacktickIndex = -1;
-                    
-                    // 줄 단위로 검색하여 줄 시작에 있는 ``` 찾기
-                    const lines = contentText.split('\n');
+                    const lines = text.split('\n');
                     for (let i = lines.length - 1; i >= 0; i--) {
                         const trimmedLine = lines[i].trim();
                         if (trimmedLine === '```' || trimmedLine.startsWith('```')) {
-                            // 이 줄까지의 내용만 사용 (닫는 백틱 제외)
-                            lastBacktickIndex = contentText.lastIndexOf('\n' + lines[i]);
+                            lastBacktickIndex = text.lastIndexOf('\n' + lines[i]);
                             if (lastBacktickIndex === -1) {
-                                // 첫 줄인 경우
-                                lastBacktickIndex = contentText.indexOf(lines[i]);
+                                lastBacktickIndex = text.indexOf(lines[i]);
                             }
                             break;
                         }
                     }
-                    
+
                     if (lastBacktickIndex >= 0) {
-                        // 닫는 백틱이 있는 줄 전까지의 내용 추출
-                        content = contentText.substring(0, lastBacktickIndex).trim();
+                        text = text.substring(0, lastBacktickIndex).trim();
                     } else {
-                        // 닫는 백틱이 없으면 끝까지 사용하되, 끝에 ```가 있으면 제거
-                        content = contentText.trim();
-                        // 끝에 남아있는 백틱 제거 (안전장치)
-                        content = content.replace(/\n*```+\s*$/m, '');
-                        content = content.replace(/```+\s*$/m, '');
-                        if (contentText !== content) {
-                            console.warn(`[parseFileOperations] Removed trailing backticks from ${pathMatch?.[1]}`);
-                        }
+                        text = text.trim();
+                        text = text.replace(/\n*```+\s*$/m, '').replace(/```+\s*$/m, '');
                     }
-                    
-                    // 추가 안전장치: 내용 끝에 남아있는 백틱 제거
-                    content = content.replace(/\n*```+\s*$/m, '');
-                    content = content.trimEnd();
+                    text = text.replace(/\n*```+\s*$/m, '').trimEnd();
                 } else {
-                    // 백틱이 없으면 CONTENT: 다음부터 블록 끝까지 전체 내용
-                    // 이렇게 하면 마크다운 파일의 모든 내용이 포함됨
-                    content = contentText.trim();
+                    text = text.trim();
                 }
-            }
+
+                return text;
+            };
+
+            const content = extractField('CONTENT');
+            const search = extractField('SEARCH');
+            const replace = extractField('REPLACE');
 
             if (typeMatch && pathMatch) {
-                const type = typeMatch[1].toLowerCase() as 'create' | 'edit' | 'delete' | 'read';
+                const type = typeMatch[1].toLowerCase() as FileOperation['type'];
                 operations.push({
                     type: type,
                     path: pathMatch[1].trim(),
                     description: descMatch ? descMatch[1].trim() : '',
                     content: content,
+                    search: search,
+                    replace: replace
                 });
             }
         }
 
         // 자동 실행 코드 제거, 백틱 정리, 제어문자 표기 제거
         for (const op of operations) {
-            if (op.content && (op.type === 'create' || op.type === 'edit')) {
+            if (op.content && (op.type === 'create' || op.type === 'edit' || op.type === 'write_full' || op.type === 'replace' || op.type === 'prepend' || op.type === 'append')) {
                 op.content = this.removeAutoExecutionCode(op.content, op.path);
                 op.content = this.removeTrailingBackticks(op.content);
                 op.content = this.removeControlCharacterArtifacts(op.content);
@@ -1135,29 +1179,13 @@ export function helper() {
         return cleaned.trimEnd();
     }
 
-    /** Append 시: 파일 끝과 겹치는 스니펫 앞부분 제거 (중복 줄 방지) */
-    private stripOverlappingPrefix(existingEnd: string, snippet: string): string {
-        if (!snippet.trim()) return snippet;
-        const normalize = (line: string) => line.trim().replace(/`/g, '').trim();
-        const el = existingEnd.trimEnd().split(/\r?\n/);
-        const sl = snippet.trim().split(/\r?\n/);
-        let stripCount = 0;
-        for (let k = 1; k <= Math.min(el.length, sl.length); k++) {
-            const existingTail = el.slice(-k).map(normalize).join('\n');
-            const snippetHead = sl.slice(0, k).map(normalize).join('\n');
-            if (existingTail === snippetHead) stripCount = k;
-        }
-        const rest = sl.slice(stripCount).join('\n').trim();
-        return rest;
-    }
-
     /** 테스트 파일 등에서 자동 실행 코드(run(), main() 등) 제거 */
     private removeAutoExecutionCode(content: string, filePath: string): string {
         if (!content) return content;
 
         // 테스트 파일인지 확인 (경로에 test/spec 포함 또는 확장자 확인)
-        const isTestFile = /test|spec/i.test(filePath) || 
-                          /\.(test|spec)\.(ts|js|tsx|jsx|py|go|java)$/i.test(filePath);
+        const isTestFile = /test|spec/i.test(filePath) ||
+            /\.(test|spec)\.(ts|js|tsx|jsx|py|go|java)$/i.test(filePath);
 
         // 모든 파일에서 제거하되, 테스트 파일은 더 엄격하게
         let cleaned = content;
@@ -1169,13 +1197,13 @@ export function helper() {
         cleaned = cleaned.replace(/\n\s*function\s+run\(\)\s*\{[\s\S]*?\}\s*\n\s*run\(\)\s*;?\s*$/m, '');
         // const run = () => { ... }; run(); 패턴
         cleaned = cleaned.replace(/\n\s*(const|let|var)\s+run\s*=\s*[^;]+;\s*\n\s*run\(\)\s*;?\s*$/m, '');
-        
+
         // main() 호출 제거
         cleaned = cleaned.replace(/^\s*main\(\)\s*;?\s*$/gm, '');
-        
+
         // Python 패턴 제거
         cleaned = cleaned.replace(/\n\s*if\s+__name__\s*==\s*['"]__main__['"]\s*:\s*\n[\s\S]*$/m, '');
-        
+
         // Node.js 패턴 제거
         cleaned = cleaned.replace(/\n\s*if\s+require\.main\s*===\s*module\s*\{[\s\S]*?\}\s*$/m, '');
 
@@ -1188,6 +1216,122 @@ export function helper() {
         cleaned = cleaned.trimEnd();
 
         return cleaned;
+    }
+
+    /** AI가 SEARCH 블록 없이 코드를 보냈을 때, 앞/뒤 줄을 기준으로 바꿔치기를 시도하는 헬퍼 함수 */
+    private applySnippetFallback(existingContent: string, proposedContent: string): string | null {
+        if (!proposedContent || !existingContent) return null;
+
+        // 단순히 통째로 포함되어 있다면 이미 적용된 것과 같음
+        if (existingContent.includes(proposedContent)) {
+            return existingContent;
+        }
+
+        const proposedLinesOriginal = proposedContent.split('\n');
+        const existLinesOriginal = existingContent.split(/\r?\n/); // Handle potential windows endings from file
+
+        const proposedLinesTrimmed = proposedLinesOriginal.map(l => l.trim());
+        const existLinesTrimmed = existLinesOriginal.map(l => l.trim());
+
+        let bestStartIdx = -1;
+        let bestEndIdx = -1;
+        let maxScore = -Infinity;
+
+        // 양 끝에서 검색할 최대 깊이 (추가된 코드가 많을 수 있으므로 최대 50줄까지)
+        const maxAnchorDepth = Math.min(50, proposedLinesOriginal.length);
+
+        for (let propStart = 0; propStart < maxAnchorDepth; propStart++) {
+            const startStr = proposedLinesTrimmed[propStart];
+            if (startStr.length === 0) continue;
+
+            const startCandidates = [];
+            for (let i = 0; i < existLinesTrimmed.length; i++) {
+                if (existLinesTrimmed[i] === startStr) startCandidates.push(i);
+            }
+            if (startCandidates.length === 0) continue;
+
+            for (let propEnd = proposedLinesOriginal.length - 1; propEnd >= Math.max(0, proposedLinesOriginal.length - maxAnchorDepth); propEnd--) {
+                const endStr = proposedLinesTrimmed[propEnd];
+                if (endStr.length === 0) continue;
+
+                if (propStart > propEnd) break;
+
+                for (const startIdx of startCandidates) {
+                    for (let endIdx = startIdx; endIdx < existLinesTrimmed.length; endIdx++) {
+                        if (existLinesTrimmed[endIdx] === endStr) {
+                            const replacedLinesCount = endIdx - startIdx + 1;
+                            const proposedLinesCount = propEnd - propStart + 1;
+                            const diff = Math.abs(replacedLinesCount - proposedLinesCount);
+
+                            // 점수: 잡아낸 블록의 범위(propEnd - propStart)가 넓을수록 높은 점수 부여
+                            // 서로 다른 점수일 경우, 차이(diff)가 적을수록 높은 점수 부여
+                            const score = (propEnd - propStart) * 10000 - diff;
+
+                            if (score > maxScore) {
+                                // 안전장치: 너무 많은 코드가 삭제되는 구간은 거부 (기존 20줄 이상 삭제되며, 새 코드가 삭제되는 코드의 30% 미만)
+                                if (!(replacedLinesCount > 20 && proposedLinesCount < replacedLinesCount * 0.3)) {
+                                    maxScore = score;
+                                    bestStartIdx = startIdx;
+                                    bestEndIdx = endIdx;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (bestStartIdx !== -1 && bestEndIdx !== -1 && bestEndIdx >= bestStartIdx) {
+            const newLines = [
+                ...existLinesOriginal.slice(0, bestStartIdx),
+                proposedContent,
+                ...existLinesOriginal.slice(bestEndIdx + 1)
+            ];
+            return newLines.join('\n');
+        }
+
+        // --- Single-line similarity fallback ---
+        // 만약 제안된 코드가 단 1~2줄이고 문맥이 부족하여 매칭에 실패했다면,
+        // 기존 텍스트 중 "가장 비슷한 줄"을 찾아 통째로 교체합니다 (오타 수정 등에 유용).
+        if (proposedLinesTrimmed.length === 1 && proposedLinesTrimmed[0].length > 4) {
+            const proposedStr = proposedLinesTrimmed[0];
+            let bestSimScore = -1;
+            let bestSimIdx = -1;
+
+            for (let i = 0; i < existLinesTrimmed.length; i++) {
+                const existStr = existLinesTrimmed[i];
+                if (existStr.length < 3) continue;
+
+                // 간단한 공통 단어/문자 비율 계산 (자카드 유사도와 유사)
+                // 완벽한 Levenshtein 대신 O(N^2) 문자열 공통 길이 탐색 등 (여기서는 대략 길이 비율)
+                let commonChars = 0;
+                for (let c = 0; c < proposedStr.length; c++) {
+                    if (existStr.includes(proposedStr[c])) commonChars++;
+                }
+                const score = commonChars / Math.max(existStr.length, proposedStr.length);
+
+                // 단순 길이 기반 score보다는 "차집합이 적을 것"을 요구
+                const diffLen = Math.abs(existStr.length - proposedStr.length);
+                if (score > 0.8 && diffLen < 15 && diffLen < proposedStr.length * 0.5) {
+                    if (score > bestSimScore) {
+                        bestSimScore = score;
+                        bestSimIdx = i;
+                    }
+                }
+            }
+
+            if (bestSimIdx !== -1) {
+                // 한 줄 교체
+                const newLines = [
+                    ...existLinesOriginal.slice(0, bestSimIdx),
+                    proposedContent,
+                    ...existLinesOriginal.slice(bestSimIdx + 1)
+                ];
+                return newLines.join('\n');
+            }
+        }
+
+        return null;
     }
 
     private async applyFileOperations(): Promise<void> {
@@ -1214,82 +1358,184 @@ export function helper() {
                         }
                         break;
 
-                    case 'edit':
+                    case 'write_full':
                         if (op.content !== undefined) {
                             const existingData = await vscode.workspace.fs.readFile(fileUri);
-                            let currentContent = Buffer.from(existingData).toString('utf8');
+                            const currentContent = Buffer.from(existingData).toString('utf8');
+                            const existingLines = currentContent.split(/\r?\n/).length;
+                            // 안전장치: 제안 내용이 기존보다 지나치게 짧으면 대량 삭제로 간주하고 적용 안 함
+                            if (currentContent.length > 200 && op.content.length < currentContent.length * 0.5) {
+                                vscode.window.showErrorMessage(
+                                    `[write_full] ${op.path}: 제안 내용이 기존 파일보다 훨씬 짧아 대량 삭제가 발생할 수 있습니다. 적용하지 않습니다. "처음에/끝에 넣어줘"는 replace(SEARCH/REPLACE)를 사용하세요.`
+                                );
+                                errorCount++;
+                                break;
+                            }
+                            edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(existingLines + 1, 0)), op.content);
+                            successCount++;
+                        }
+                        break;
 
-                            if (op.content.includes('<<<<<<< SEARCH')) {
-                                const blocks = op.content.split(/>>>>>>> REPLACE\s*/);
-                                let anyApplied = false;
+                    case 'prepend':
+                        if (op.content !== undefined) {
+                            const existingData = await vscode.workspace.fs.readFile(fileUri);
+                            const currentContent = Buffer.from(existingData).toString('utf8');
+                            const newContent = op.content.trim() + '\n\n' + currentContent;
+                            const docLines = currentContent.split(/\r?\n/).length;
+                            edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)), newContent);
+                            successCount++;
+                        }
+                        break;
 
-                                for (const block of blocks) {
-                                    if (!block.includes('<<<<<<< SEARCH')) continue;
-                                    const parts = block.split(/=======/);
-                                    if (parts.length !== 2) continue;
+                    case 'append':
+                        if (op.content !== undefined) {
+                            const existingData = await vscode.workspace.fs.readFile(fileUri);
+                            const currentContent = Buffer.from(existingData).toString('utf8');
+                            const newContent = currentContent.trimEnd() + '\n\n' + op.content.trim();
+                            const docLines = currentContent.split(/\r?\n/).length;
+                            edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)), newContent);
+                            successCount++;
+                        }
+                        break;
 
-                                    const searchPart = parts[0].split(/<<<<<<< SEARCH\s*/)[1];
-                                    const replacePart = parts[1];
+                    case 'replace':
+                    case 'edit':
+                        const existingData = await vscode.workspace.fs.readFile(fileUri);
+                        let currentContent = Buffer.from(existingData).toString('utf8');
 
-                                    if (searchPart && replacePart) {
-                                        let trimmedSearch = searchPart.trim();
-                                        let trimmedReplace = replacePart.trim();
-                                        // 제어문자 제거
-                                        trimmedSearch = this.removeControlCharacterArtifacts(trimmedSearch);
-                                        trimmedReplace = this.removeControlCharacterArtifacts(trimmedReplace);
-                                        // SEARCH와 REPLACE가 동일하면 스킵 (불필요한 변경 방지)
-                                        if (trimmedSearch === trimmedReplace) {
-                                            continue;
-                                        }
-                                        // 의심스러운 코드 삭제 감지: SEARCH가 REPLACE보다 훨씬 긴 경우
-                                        const searchLines = trimmedSearch.split('\n').length;
-                                        const replaceLines = trimmedReplace.split('\n').length;
-                                        const searchLength = trimmedSearch.length;
-                                        const replaceLength = trimmedReplace.length;
-                                        
-                                        // REPLACE가 빈 문자열이거나, SEARCH가 REPLACE보다 3배 이상 긴 경우 경고 후 스킵
-                                        if (trimmedReplace === '' || 
-                                            (searchLines > 3 && replaceLines === 0) ||
-                                            (searchLength > 100 && replaceLength < searchLength * 0.3)) {
-                                            vscode.window.showWarningMessage(
-                                                `⚠️ 의심스러운 코드 삭제 감지: ${op.path}\n` +
-                                                `SEARCH: ${searchLines}줄 (${searchLength}자) → REPLACE: ${replaceLines}줄 (${replaceLength}자)\n` +
-                                                `기존 코드가 대량 삭제될 수 있습니다. 이 변경을 스킵합니다.`,
-                                                '확인'
-                                            );
-                                            // 기본적으로 의심스러운 삭제는 스킵
-                                            continue;
-                                        }
-                                        
-                                        if (currentContent.includes(trimmedSearch)) {
-                                            currentContent = currentContent.replace(trimmedSearch, trimmedReplace);
-                                            anyApplied = true;
-                                        }
-                                    }
-                                }
+                        let anyApplied = false;
 
-                                if (anyApplied) {
-                                    const docLines = currentContent.split('\n').length;
-                                    edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)), currentContent);
-                                    successCount++;
+                        // 1. Explicit SEARCH and REPLACE parameters natively parsed
+                        if (op.search && op.replace !== undefined) {
+                            let trimmedSearch = this.removeControlCharacterArtifacts(op.search);
+                            let trimmedReplace = this.removeControlCharacterArtifacts(op.replace);
+
+                            if (trimmedSearch !== trimmedReplace) {
+                                const searchLines = trimmedSearch.split('\n').length;
+                                const replaceLines = trimmedReplace.split('\n').length;
+                                const searchLength = trimmedSearch.length;
+                                const replaceLength = trimmedReplace.length;
+
+                                if (trimmedReplace === '' || (searchLines > 3 && replaceLines === 0) || (searchLength > 100 && replaceLength < searchLength * 0.3)) {
+                                    vscode.window.showWarningMessage(`⚠️ 의심스러운 코드 삭제 감지: ${op.path}. 스킵합니다.`, '확인');
+                                } else if (currentContent.includes(trimmedSearch)) {
+                                    currentContent = currentContent.replace(trimmedSearch, trimmedReplace);
+                                    anyApplied = true;
                                 } else {
-                                    throw new Error(`No matching SEARCH blocks found in ${op.path}`);
+                                    vscode.window.showErrorMessage(`[${op.type}] ${op.path}: 찾을 코드가 파일 내에 정확히 존재하지 않습니다 (띄어쓰기/들여쓰기 확인 필요).`);
+                                    errorCount++;
+                                    break;
                                 }
                             } else {
-                                // CONTENT가 SEARCH/REPLACE가 아니면: 전체 교체 vs 끝에 추가 구분
-                                const opLines = op.content.split(/\r?\n/).length;
-                                const existingLines = currentContent.split(/\r?\n/).length;
-                                const isLikelySnippet = opLines <= 15 && existingLines > opLines * 2;
-                                let contentToApply: string;
-                                if (isLikelySnippet) {
-                                    const toAppend = this.stripOverlappingPrefix(currentContent, op.content);
-                                    contentToApply = toAppend ? currentContent.trimEnd() + '\n\n' + toAppend : currentContent;
-                                } else {
-                                    contentToApply = op.content;
+                                anyApplied = true; // No-op but successful
+                            }
+                        }
+                        // 2. Legacy <<<<<<< SEARCH inside content
+                        else if (op.content !== undefined && op.content.includes('<<<<<<< SEARCH')) {
+                            const blocks = op.content.split(/>>>>>>> REPLACE\s*/);
+                            for (const block of blocks) {
+                                if (!block.includes('<<<<<<< SEARCH')) continue;
+                                const parts = block.split(/=======/);
+                                if (parts.length !== 2) continue;
+
+                                let trimmedSearch = this.removeControlCharacterArtifacts(parts[0].split(/<<<<<<< SEARCH\s*/)[1].trim());
+                                let trimmedReplace = this.removeControlCharacterArtifacts(parts[1].trim());
+
+                                if (trimmedSearch && trimmedReplace !== undefined) {
+                                    if (trimmedSearch === trimmedReplace) {
+                                        anyApplied = true;
+                                        continue;
+                                    }
+                                    const searchLines = trimmedSearch.split('\n').length;
+                                    const replaceLines = trimmedReplace.split('\n').length;
+                                    const searchLength = trimmedSearch.length;
+                                    const replaceLength = trimmedReplace.length;
+
+                                    if (trimmedReplace === '' || (searchLines > 3 && replaceLines === 0) || (searchLength > 100 && replaceLength < searchLength * 0.3)) {
+                                        vscode.window.showWarningMessage(`⚠️ 의심스러운 코드 삭제 감지: ${op.path}. 스킵합니다.`, '확인');
+                                        continue;
+                                    }
+
+                                    if (currentContent.includes(trimmedSearch)) {
+                                        currentContent = currentContent.replace(trimmedSearch, trimmedReplace);
+                                        anyApplied = true;
+                                    }
                                 }
-                                const docLines = contentToApply.split('\n').length;
-                                edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(existingLines + 1, 0)), contentToApply);
-                                successCount++;
+                            }
+                        }
+                        // 3. Description 기반 단순 텍스트 교체 (LLM이 content만 주고 search를 안 준 경우에 대한 스마트 폴백)
+                        else if (op.content !== undefined) {
+                            let smartFallbackSuccess = false;
+
+                            // description에서 "Change A to B", "Replace A with B" 패턴 추출
+                            if (op.description && currentContent.includes(op.content)) {
+                                // 이미 변경되었다고 간주
+                                anyApplied = true;
+                                smartFallbackSuccess = true;
+                            } else if (op.description && typeof op.description === 'string') {
+                                const desc = op.description.trim();
+                                let extractedSearch = '';
+                                let extractedReplace = '';
+
+                                const changeMatch = desc.match(/^change\s+(.+?)\s+to\s+(.+)$/i);
+                                const replaceMatch = desc.match(/^replace\s+(.+?)\s+with\s+(.+)$/i);
+                                const koreanMatch1 = desc.match(/^'?"?(.+?)'?"?\s*[을를]\s*'?"?(.+?)'?"?\s*[으]?로\s*(변경|수정|대체)/);
+                                const arrowMatch = desc.match(/(.+?)\s*(?:->|=>)\s*(.+)/);
+
+                                if (changeMatch) {
+                                    extractedSearch = changeMatch[1];
+                                    extractedReplace = changeMatch[2];
+                                } else if (replaceMatch) {
+                                    extractedSearch = replaceMatch[1];
+                                    extractedReplace = replaceMatch[2];
+                                } else if (koreanMatch1) {
+                                    extractedSearch = koreanMatch1[1];
+                                    extractedReplace = koreanMatch1[2];
+                                } else if (arrowMatch) {
+                                    extractedSearch = arrowMatch[1];
+                                    extractedReplace = arrowMatch[2];
+                                }
+
+                                if (extractedSearch && currentContent.includes(extractedSearch)) {
+                                    // LLM이 content를 엉뚱하게 줬을 수도 있으니, extractedReplace를 우선으로 쓰되, 
+                                    // op.content가 명시되어 있다면 op.content가 더 정확할 수 있으므로 op.content로 대체
+                                    const replacement = op.content.length > 0 ? op.content : extractedReplace;
+                                    currentContent = currentContent.replace(extractedSearch, replacement);
+                                    anyApplied = true;
+                                    smartFallbackSuccess = true;
+                                }
+                            }
+
+                            if (!smartFallbackSuccess) {
+                                // 기존의 applySnippetFallback 로직 (문맥 기반)
+                                const fallbackContent = this.applySnippetFallback(currentContent, op.content);
+                                if (fallbackContent !== null) {
+                                    currentContent = fallbackContent;
+                                    anyApplied = true;
+                                } else {
+                                    // Fallback도 실패했을 때
+                                    if (currentContent.length > 200 && op.content.length < currentContent.length * 0.5) {
+                                        vscode.window.showErrorMessage(
+                                            `[${op.type}] ${op.path}: AI가 잘못된 포맷으로 코드 수정(일부분)만 요청했습니다. 기존 코드의 어떤 부분을 수정할지 시스템이 찾지 못해 차단합니다. AI에게 명확한 SEARCH/REPLACE 블록을 사용하라고 다시 지시해주세요.`
+                                        );
+                                        errorCount++;
+                                        break;
+                                    } else {
+                                        // 파일 내용을 통째로 새로 쓴 경우에만 덮어쓰기 허용
+                                        currentContent = op.content;
+                                        anyApplied = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (anyApplied) {
+                            const docLines = currentContent.split(/\r?\n/).length;
+                            edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)), currentContent);
+                            successCount++;
+                        } else {
+                            if (op.content || (op.search && op.replace !== undefined)) {
+                                throw new Error(`[${op.type}] 수행 실패: 매칭되는 부분을 찾을 수 없거나 파일 보호 차단됨 (${op.path})`);
                             }
                         }
                         break;
@@ -1313,7 +1559,7 @@ export function helper() {
                 // 수정된 파일들을 명시적으로 저장
                 const modifiedFiles: vscode.Uri[] = [];
                 for (const op of this.pendingOperations) {
-                    if (op.type === 'create' || op.type === 'edit') {
+                    if (op.type === 'create' || op.type === 'edit' || op.type === 'write_full' || op.type === 'replace' || op.type === 'prepend' || op.type === 'append') {
                         const fileUri = vscode.Uri.joinPath(workspaceFolder.uri, op.path);
                         modifiedFiles.push(fileUri);
                     }
@@ -1404,7 +1650,7 @@ export function helper() {
 
         try {
             const diffs = await checkpointManager.compareWithCurrent(checkpointId);
-            
+
             if (diffs.length === 0) {
                 vscode.window.showInformationMessage('No differences found between checkpoint and current workspace.');
                 return;
@@ -1479,14 +1725,14 @@ export function helper() {
 
             if (confirmed === 'Yes') {
                 await checkpointManager.restoreCheckpoint(checkpointId, workspaceOnly);
-                
+
                 if (!workspaceOnly && checkpoint.planSnapshot) {
                     // Plan도 복원
                     this.agentEngine.setPlanFromResponse(JSON.stringify(checkpoint.planSnapshot));
                 }
 
                 vscode.window.showInformationMessage('Checkpoint restored successfully');
-                
+
                 // 체크포인트 목록 새로고침
                 await this.getCheckpoints();
             }
@@ -1517,7 +1763,7 @@ export function helper() {
             if (confirmed === 'Yes') {
                 await checkpointManager.deleteCheckpoint(checkpointId);
                 vscode.window.showInformationMessage('Checkpoint deleted');
-                
+
                 // 체크포인트 목록 새로고침
                 await this.getCheckpoints();
             }
@@ -1554,13 +1800,71 @@ export function helper() {
                 await vscode.commands.executeCommand('vscode.diff', emptyUri, proposedUri, `[CREATE] ${operation.path}`);
                 setTimeout(() => disposable.dispose(), 5000);
 
-            } else if (operation.type === 'edit') {
+            } else if (operation.type === 'prepend' || operation.type === 'append') {
+                try {
+                    const existingData = await vscode.workspace.fs.readFile(fileUri);
+                    const existingContent = Buffer.from(existingData).toString('utf8');
+                    const text = this.removeControlCharacterArtifacts((operation.content || '').trim());
+                    const proposedContent = operation.type === 'prepend'
+                        ? text + '\n\n' + existingContent
+                        : existingContent.trimEnd() + '\n\n' + text;
+                    const normalize = (s: string) => s.replace(/\r\n|\r/g, '\n').trim();
+                    if (normalize(existingContent) === normalize(proposedContent)) {
+                        vscode.window.showInformationMessage(`[${operation.type}] ${operation.path}: 적용 예정 내용이 현재와 동일합니다.`);
+                        return;
+                    }
+                    const provider = new (class implements vscode.TextDocumentContentProvider {
+                        provideTextDocumentContent(): string { return proposedContent; }
+                    })();
+                    const disposable = vscode.workspace.registerTextDocumentContentProvider('tokamak-preview', provider);
+                    const proposedUri = vscode.Uri.parse(`tokamak-preview:${operation.path}`);
+                    await vscode.commands.executeCommand('vscode.diff', fileUri, proposedUri, `[${operation.type}] ${operation.path}`);
+                    setTimeout(() => disposable.dispose(), 5000);
+                } catch (error) {
+                    vscode.window.showErrorMessage(`Preview failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                }
+            } else if (operation.type === 'write_full') {
+                try {
+                    const existingData = await vscode.workspace.fs.readFile(fileUri);
+                    const existingContent = Buffer.from(existingData).toString('utf8');
+                    let proposedContent = this.removeControlCharacterArtifacts(operation.content || '');
+                    const normalize = (s: string) => s.replace(/\r\n|\r/g, '\n').trim();
+                    if (normalize(existingContent) === normalize(proposedContent)) {
+                        vscode.window.showInformationMessage(`[write_full] ${operation.path}: 적용 예정 내용이 현재 파일과 동일합니다.`);
+                        return;
+                    }
+                    const provider = new (class implements vscode.TextDocumentContentProvider {
+                        provideTextDocumentContent(): string { return proposedContent; }
+                    })();
+                    const disposable = vscode.workspace.registerTextDocumentContentProvider('tokamak-preview', provider);
+                    const proposedUri = vscode.Uri.parse(`tokamak-preview:${operation.path}`);
+                    await vscode.commands.executeCommand('vscode.diff', fileUri, proposedUri, `[write_full] ${operation.path}`);
+                    setTimeout(() => disposable.dispose(), 5000);
+                } catch (error) {
+                    vscode.window.showErrorMessage(`Preview failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                }
+            } else if (operation.type === 'edit' || operation.type === 'replace') {
                 try {
                     const existingData = await vscode.workspace.fs.readFile(fileUri);
                     const existingContent = Buffer.from(existingData).toString('utf8');
                     let proposedContent = operation.content || '';
 
-                    if (proposedContent.includes('<<<<<<< SEARCH')) {
+                    // 1. Explicit SEARCH and REPLACE parameters
+                    if (operation.search && operation.replace !== undefined) {
+                        let searchContent = this.removeControlCharacterArtifacts(operation.search);
+                        let replaceContent = this.removeControlCharacterArtifacts(operation.replace);
+
+                        if (searchContent !== replaceContent && existingContent.includes(searchContent)) {
+                            proposedContent = existingContent.replace(searchContent, replaceContent);
+                        } else if (!existingContent.includes(searchContent)) {
+                            vscode.window.showErrorMessage(`[${operation.type}] ${operation.path}: 찾을 코드가 파일 내에 존재하지 않습니다. Diff를 표시할 수 없습니다.`);
+                            return;
+                        } else {
+                            proposedContent = existingContent;
+                        }
+                    }
+                    // 2. Legacy <<<<<<< SEARCH inside content
+                    else if (proposedContent.includes('<<<<<<< SEARCH')) {
                         const blocks = proposedContent.split('>>>>>>> REPLACE');
                         let result = existingContent;
                         for (const block of blocks) {
@@ -1572,7 +1876,7 @@ export function helper() {
                             // 제어문자 제거
                             if (searchContent) searchContent = this.removeControlCharacterArtifacts(searchContent);
                             if (replaceContent) replaceContent = this.removeControlCharacterArtifacts(replaceContent);
-                            
+
                             if (searchContent !== undefined && replaceContent !== undefined) {
                                 // SEARCH와 REPLACE가 동일하면 스킵 (불필요한 변경 방지)
                                 if (searchContent === replaceContent) {
@@ -1583,32 +1887,40 @@ export function helper() {
                                 const replaceLines = replaceContent.split('\n').length;
                                 const searchLength = searchContent.length;
                                 const replaceLength = replaceContent.length;
-                                
-                                if (replaceContent === '' || 
+
+                                if (replaceContent === '' ||
                                     (searchLines > 3 && replaceLines === 0) ||
                                     (searchLength > 100 && replaceLength < searchLength * 0.3)) {
                                     // 미리보기에서는 표시하되 실제 적용은 스킵됨
                                     continue;
                                 }
-                                
+
                                 if (result.includes(searchContent)) {
                                     result = result.replace(searchContent, replaceContent);
                                 }
                             }
                         }
                         proposedContent = result;
-                    } else {
-                        // SEARCH/REPLACE가 없을 때: 짧은 내용이면 끝에 추가로 해석 (전체 덮어쓰기 방지)
-                        const opLines = (operation.content || '').split(/\r?\n/).length;
-                        const existingLines = existingContent.split(/\r?\n/).length;
-                        if (opLines <= 15 && existingLines > opLines * 2) {
-                            const toAppend = this.stripOverlappingPrefix(existingContent, operation.content || '');
-                            proposedContent = toAppend
-                                ? existingContent.trimEnd() + '\n\n' + toAppend
-                                : existingContent;
+                    }
+                    // 3. Just content, try fuzzy snippet fallback
+                    else {
+                        const fallbackContent = this.applySnippetFallback(existingContent, proposedContent);
+                        if (fallbackContent !== null) {
+                            proposedContent = fallbackContent;
+                        } else {
+                            // 너무 짧은 수정은 에러 처리하여 프리뷰에서도 막음
+                            if (existingContent.length > 200 && proposedContent.length < existingContent.length * 0.5) {
+                                vscode.window.showErrorMessage(
+                                    `[${operation.type}] ${operation.path}: AI가 잘못된 포맷으로 코드 수정(일부분)만 요청했습니다. 코드 매칭도 실패하여 차단합니다.`
+                                );
+                                return; // Diff 창을 띄우지 않음.
+                            } else {
+                                // 기존과 완전히 대체 (write_full 처럼)
+                                // proposedContent는 이미 operation.content가 들어있음
+                            }
                         }
                     }
-                    
+
                     // 최종적으로 제어문자 제거 (diff 미리보기용)
                     proposedContent = this.removeControlCharacterArtifacts(proposedContent);
 
@@ -1792,7 +2104,7 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
 
                 // In agent or ask mode, parse file operations
                 const operations = this.parseFileOperations(fullResponse);
-                
+
                 // Agent 모드도 Ask와 동일: 파일 작업은 사용자가 "Apply Changes"를 누를 때만 적용.
                 // (이전에는 Agent에서 응답 직후 자동 실행해 Apply 전에 이미 변경된 것처럼 보이는 문제가 있어 제거함)
 
@@ -1927,11 +2239,11 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
         // 각 명령어를 순차적으로 실행
         let allOutput = '';
         let currentCwd = workspaceFolder.uri.fsPath; // 현재 작업 디렉토리 추적
-        
+
         try {
             for (let i = 0; i < commands.length; i++) {
                 const cmd = commands[i];
-                
+
                 // cd 명령어 처리 (단, && || ; 같은 연산자가 포함된 경우는 그대로 실행)
                 // && || ; 가 포함된 명령어는 cd로 인식하지 않고 그대로 실행
                 if (!cmd.includes('&&') && !cmd.includes('||') && !cmd.includes(';')) {
@@ -1940,8 +2252,8 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
                     if (cdMatch) {
                         const targetDir = cdMatch[1].trim();
                         // 상대 경로인 경우 현재 cwd 기준으로 해석
-                        const newCwd = require('path').isAbsolute(targetDir) 
-                            ? targetDir 
+                        const newCwd = require('path').isAbsolute(targetDir)
+                            ? targetDir
                             : require('path').join(currentCwd, targetDir);
                         currentCwd = newCwd;
                         // 터미널에만 cd 명령어 전송 (exec는 cwd 옵션으로 처리)
@@ -1950,10 +2262,10 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
                         continue;
                     }
                 }
-                
+
                 // 터미널에 명령어 표시 및 실행
                 terminal.sendText(cmd);
-                
+
                 // Execute and capture output
                 vscode.window.showInformationMessage(`Running (${i + 1}/${commands.length}): ${cmd}`);
 
@@ -1962,8 +2274,8 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
 
                     // && || ; 같은 연산자가 포함된 명령어는 셸을 통해 실행
                     // cd 명령어도 셸 내부 명령어이므로 셸을 통해 실행해야 함
-                    const shellCmd = process.platform === 'win32' 
-                        ? `cmd /c "${cmd}"` 
+                    const shellCmd = process.platform === 'win32'
+                        ? `cmd /c "${cmd}"`
                         : `/bin/bash -c "${cmd.replace(/"/g, '\\"')}"`;
 
                     const result = await new Promise<string>((resolve) => {
@@ -1991,7 +2303,7 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
                     });
 
                     allOutput += `\n--- Command ${i + 1}/${commands.length}: ${cmd} ---\n${result}\n`;
-                    
+
                     // 에러가 발생하면 중단 (선택적 - 필요시 계속 진행하도록 변경 가능)
                     if (result.includes('[ERROR]')) {
                         break;
@@ -2576,6 +2888,22 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
         .operation-item .op-type.edit {
             background-color: var(--vscode-editorWarning-foreground);
             color: black;
+        }
+        .operation-item .op-type.write_full {
+            background-color: var(--vscode-editorWarning-foreground);
+            color: black;
+        }
+        .operation-item .op-type.replace {
+            background-color: var(--vscode-charts-blue);
+            color: white;
+        }
+        .operation-item .op-type.prepend {
+            background-color: var(--vscode-charts-green);
+            color: white;
+        }
+        .operation-item .op-type.append {
+            background-color: var(--vscode-charts-green);
+            color: white;
         }
         .operation-item .op-type.delete {
             background-color: var(--vscode-errorForeground);
