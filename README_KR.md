@@ -24,7 +24,6 @@
 | 설정 | 설명 | 필수 |
 |------|------|:----:|
 | `tokamak.apiKey` | AI 서비스 API Key | ✅ |
-| *(엔드포인트)* | `https://api.ai.tokamak.network` 고정 (설정 불가) | - |
 | `tokamak.models` | 사용 가능한 모델 목록 | - |
 | `tokamak.selectedModel` | 현재 선택된 모델 | - |
 | `tokamak.enableInlineCompletion` | Ghost Text 자동완성 활성화 | - |
@@ -35,14 +34,11 @@
 {
   "tokamak.apiKey": "your-api-key",
   "tokamak.models": [
-    "qwen3-235b-thinking",
     "qwen3-235b",
     "qwen3-80b-next",
     "qwen3-coder-flash",
-    "gemini-3-pro",
-    "gemini-3-flash"
   ],
-  "tokamak.selectedModel": "qwen3-235b-thinking"
+  "tokamak.selectedModel": "qwen3-235b"
 }
 ```
 

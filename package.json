@@ -2,7 +2,7 @@
   "name": "tokamak-agent",
   "displayName": "Tokamak AI Agent",
   "description": "AI coding assistant powered by company's LiteLLM-based OpenAI-compatible API",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "tokamak",
   "license": "MIT",
   "repository": {
