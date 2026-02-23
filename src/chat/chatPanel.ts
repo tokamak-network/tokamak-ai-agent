@@ -297,7 +297,7 @@ export class ChatPanel {
 
         const panel = vscode.window.createWebviewPanel(
             ChatPanel.viewType,
-            'Tokamak AI Chat',
+            'Tokamak AI Agent',
             column,
             {
                 enableScripts: true,
@@ -305,6 +305,9 @@ export class ChatPanel {
                 localResourceRoots: [extensionUri],
             }
         );
+
+        // 상단 탭에 익스텐션 전용 아이콘 표시
+        panel.iconPath = vscode.Uri.joinPath(extensionUri, 'images', 'icon.png');
 
         ChatPanel.currentPanel = new ChatPanel(panel, extensionUri);
     }
