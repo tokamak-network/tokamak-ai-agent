@@ -37,6 +37,8 @@
     "qwen3-235b",
     "qwen3-80b-next",
     "qwen3-coder-flash",
+    "minimax-m2.5",
+    "glm-4.7"
   ],
   "tokamak.selectedModel": "qwen3-235b"
 }
