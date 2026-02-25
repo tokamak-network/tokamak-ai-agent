@@ -10,6 +10,7 @@ import { CheckpointManager, Checkpoint } from './checkpointManager.js';
 import { streamChatCompletion, ChatMessage } from '../api/client.js';
 import { isCheckpointsEnabled } from '../config/settings.js';
 import { logger } from '../utils/logger.js';
+import { stripThinkingBlocks } from '../utils/contentUtils.js';
 
 /**
  * AI 응답 텍스트에서 가장 바깥쪽 JSON 객체를 올바르게 추출합니다.
@@ -161,7 +162,7 @@ export class AgentEngine {
         try {
             // [Phase 4] Global RAG: 관련 파일 검색 및 컨텍스트 구성
             const relevantFiles = await this.searcher.searchRelevantFiles(this.context.userInput);
-            const globalContext = await this.contextManager.assembleContext(relevantFiles);
+            const globalContext = await this.contextManager.assembleContext(relevantFiles, this.context.tokenBudget);
 
             const prompt = `
 사용자 요청: ${this.context.userInput}
@@ -184,14 +185,30 @@ ${globalContext}
    예: "- [ ] npm run build 실행하여 빌드 성공 확인"
 `;
 
-            const aiResponse = await this.streamWithUI([{ role: 'user', content: prompt }]);
+            let aiResponse = await this.streamWithUI([{ role: 'user', content: prompt }]);
 
             this.plan = this.planner.parsePlan(aiResponse);
+
+            // plan이 비어있으면 (모델이 [TOOL_CALL]이나 설명만 출력한 경우) 즉시 재시도
+            if (this.plan.length === 0 && aiResponse.trim().length > 0) {
+                logger.warn('[AgentEngine]', 'No plan steps extracted — retrying with explicit format instruction');
+                const retryPrompt = `이전 응답에서 실행 가능한 계획을 추출하지 못했습니다. [TOOL_CALL] 블록이나 도구 호출 없이, 반드시 마크다운 체크리스트 형식으로만 답변해주세요.
+
+사용자 요청: ${this.context.userInput}
+
+출력 형식 (이것만 출력, 다른 내용 없음):
+- [ ] 첫 번째 단계 설명
+- [ ] 두 번째 단계 설명
+- [ ] 세 번째 단계 설명`;
+                aiResponse = await this.streamWithUI([{ role: 'user', content: retryPrompt }]);
+                this.plan = this.planner.parsePlan(aiResponse);
+            }
+
             if (this.plan.length > 0) {
                 this.notifyPlanChange();
                 await this.transitionTo('Executing');
             } else {
-                logger.warn('[AgentEngine]', 'No plan extracted.');
+                logger.warn('[AgentEngine]', 'No plan extracted after retry.');
                 await this.transitionTo('Done');
             }
         } catch (error) {
@@ -250,14 +267,28 @@ ${globalContext}
             if (!step.action) {
                 logger.info('[AgentEngine]', `Generating action for step: ${step.id}`);
                 const relevantFiles = await this.searcher.searchRelevantFiles(step.description);
-                const stepContext = await this.contextManager.assembleContext(relevantFiles);
+                const stepContext = await this.contextManager.assembleContext(relevantFiles, this.context.tokenBudget);
+
+                // 단계 설명에서 파일 경로를 추출하여 현재 내용을 직접 포함
+                // → AI가 SEARCH 블록 작성 시 정확한 파일 내용을 참조할 수 있게 함
+                let directFileContext = '';
+                const fileInDesc = step.description.match(/[`'"]([\w./\\-]+\.\w+)[`'"]/)?.[1];
+                if (fileInDesc) {
+                    try {
+                        const fileContent = await this.executor.readFile(fileInDesc);
+                        const filePreview = fileContent.length > 3000
+                            ? fileContent.substring(0, 3000) + '\n... (truncated)'
+                            : fileContent;
+                        directFileContext = `\n**수정 대상 파일의 현재 전체 내용 (\`${fileInDesc}\`) — SEARCH 블록 작성 시 이 내용에서 정확히 복사하세요:**\n\`\`\`\n${filePreview}\n\`\`\`\n`;
+                    } catch { /* 파일 미존재 → 새 파일 생성 케이스 */ }
+                }
 
                 const prompt = `
 현재 단계: ${step.description}
 
 프로젝트 상황:
 ${stepContext}
-
+${directFileContext}
 위 단계를 실행하기 위한 **JSON Action**을 생성해주세요.
 
 **단일 파일 작업**:
@@ -325,6 +356,10 @@ ${stepContext}
             }
 
             if (action) {
+                // Pre-flight: SEARCH/REPLACE 블록이 대상 파일에 실제로 존재하는지 사전 검사
+                // 불일치 시 현재 파일 내용을 제공하여 AI에게 즉시 수정 요청
+                action = await this.preflightCheckAction(action, step);
+
                 // 터미널 명령 실행 전 메시지 표시
                 if (action.type === 'run' && this.context.onMessage) {
                     this.context.onMessage('assistant', `🔧 Executing: \`${action.payload.command}\``);
@@ -348,7 +383,12 @@ ${stepContext}
                     }
                 }
             } else {
-                step.result = 'No executable action found for this step.';
+                // 액션이 생성되지 않음 → 실패로 처리, Fixing에서 재시도
+                // (silent skip 방지 — AI가 JSON 없이 설명만 출력하는 경우 대응)
+                throw new Error(
+                    'No executable action generated. The AI response did not contain a valid JSON action.\n' +
+                    'Please output ONLY a JSON action like: { "type": "write", "payload": { "path": "...", "content": "..." } }'
+                );
             }
 
             step.status = 'done';
@@ -370,7 +410,10 @@ ${stepContext}
             if (!step.dependsOn || step.dependsOn.length === 0) return true;
             return step.dependsOn.every(depId => {
                 const depStep = this.plan.find(s => s.id === depId);
-                return depStep && depStep.status === 'done';
+                // 존재하지 않는 의존성 ID는 충족된 것으로 처리
+                // (AI가 잘못된 ID를 참조하거나 오타냈을 때 플랜 전체가 멈추는 문제 방지)
+                if (!depStep) return true;
+                return depStep.status === 'done';
             });
         });
     }
@@ -388,8 +431,17 @@ ${stepContext}
             }
             await this.transitionTo('Fixing');
         } else {
-            // 에러가 없으면 Reflecting 단계로 이동하여 AI가 결과 평가
-            await this.transitionTo('Reflecting');
+            // 에러 없음 — 실행 결과가 명백한 성공이면 Reflection AI 호출을 건너뜀
+            // (매 단계마다 Reflection을 호출하면 API 비용/지연이 2배가 됨)
+            const currentStep = this.plan[this.currentStepIndex];
+            const resultText = currentStep?.result ?? '';
+            const isCleanSuccess = /successfully|success|created|updated|wrote/i.test(resultText);
+            if (isCleanSuccess) {
+                logger.info('[AgentEngine]', 'Clean execution, no errors — skipping Reflection');
+                await this.transitionTo('Executing');
+            } else {
+                await this.transitionTo('Reflecting');
+            }
         }
     }
 
@@ -464,6 +516,23 @@ ${stepContext}
         const errorContext = this.observer.formatDiagnostics(this.lastDiagnostics);
         const stepResult = step.result || '(No result recorded)';
 
+        // SEARCH/REPLACE 불일치 실패 감지 → 대상 파일의 현재 내용을 명시적으로 포함
+        let searchReplaceHint = '';
+        const isSearchReplaceFail = /SEARCH block does not match|Search\/Replace failed|No valid SEARCH\/REPLACE/.test(stepResult);
+        if (isSearchReplaceFail) {
+            const filePathMatch = stepResult.match(/(?:failed in|in )\s*([\w./\\-]+\.\w+)/);
+            if (filePathMatch) {
+                try {
+                    const currentContent = await this.executor.readFile(filePathMatch[1]);
+                    const preview = currentContent.length > 3000
+                        ? currentContent.substring(0, 3000) + '\n... (truncated)'
+                        : currentContent;
+                    searchReplaceHint = `\n\n⚠️ **SEARCH/REPLACE 불일치**: SEARCH 블록이 파일에 존재하지 않습니다.\n`
+                        + `현재 **${filePathMatch[1]}** 파일의 정확한 내용 (SEARCH 블록은 이 텍스트에서 그대로 복사해야 합니다):\n\`\`\`\n${preview}\n\`\`\`\n`;
+                } catch { /* 무시 */ }
+            }
+        }
+
         // 연속 실패 횟수에 따라 가이드 강도 조절 (Cline의 progressiveErrorMessage 패턴)
         const mistakeWarning = this.consecutiveMistakeCount >= 3
             ? `\n⚠️  ${this.consecutiveMistakeCount}번 연속 실패 중입니다. 지금까지와 다른 방법을 시도하세요. ` +
@@ -493,7 +562,7 @@ ${mistakeWarning}
 
 **발생한 에러**:
 ${errorContext}
-${fileContext}
+${fileContext}${searchReplaceHint}
 이 에러를 수정하기 위한 JSON Action을 생성해주세요.
 기존 파일 수정 시 반드시 SEARCH/REPLACE 형식을 사용하세요 (파일 전체를 덮어쓰지 마세요):
 { "type": "write", "payload": { "path": "...", "content": "<<<<<<< SEARCH\\n(원본 코드 일부)\\n=======\\n(수정된 코드)\\n>>>>>>> REPLACE" } }
@@ -529,31 +598,226 @@ ${fileContext}
         }
     }
 
+    /** 에이전트 역할, 도구 사용 규칙, 코드 품질 기준을 AI에게 지정하는 System Prompt */
+    private static readonly SYSTEM_PROMPT = `You are an expert AI coding agent integrated into a VS Code extension. Your role is to autonomously plan and execute software engineering tasks by writing, reading, and modifying files.
+
+## CRITICAL RESTRICTIONS (read first)
+- **NO tool calls**: Do NOT output [TOOL_CALL], <tool_call>, or any native function-calling blocks. You have no external tools.
+- **NO shell commands for exploration**: Do not try to run ls, cat, or other commands to explore the project. The context you need is already provided.
+- **Planning mode**: When asked to make a plan, output ONLY a markdown checklist (- [ ] ...). Nothing else.
+- **Action mode**: When asked for an action, output ONLY a JSON object. Nothing else.
+
+## Core Rules
+1. **SEARCH/REPLACE format**: When modifying existing files, ALWAYS use the SEARCH/REPLACE format. NEVER overwrite the entire file unless explicitly creating a brand-new file.
+   The delimiters must be EXACTLY as shown (7 < characters, 7 = characters, 7 > characters):
+   <<<<<<< SEARCH
+   (exact lines copied from the original file — must match precisely)
+   =======
+   (new replacement lines)
+   >>>>>>> REPLACE
+
+2. **JSON output for actions**: Output ONLY valid JSON (optionally wrapped in a \`\`\`json block). No explanation text outside the JSON.
+   When the SEARCH/REPLACE content is inside a JSON string, escape newlines as \\n:
+   { "type": "write", "payload": { "path": "src/foo.ts", "content": "<<<<<<< SEARCH\\nold line\\n=======\\nnew line\\n>>>>>>> REPLACE" } }
+
+3. **Minimal changes**: Only modify what is strictly necessary. Do not reformat unrelated code.
+4. **Correctness first**: Ensure all imports, types, and references are valid before finalizing.
+5. **Language**: Respond in the same language as the user's request.`;
+
     /**
      * AI 스트리밍 응답을 수집하면서 동시에 webview UI에 실시간 전달합니다.
-     * onStreamStart / onStreamChunk / onStreamEnd 콜백이 설정된 경우 webview로 전달됩니다.
+     * System Prompt를 자동으로 prepend합니다.
      * 모든 handlePlanning / handleExecution / handleReflection / handleFixing 에서 공통 사용.
+     *
+     * - context.abortSignal이 설정되어 있으면 스트리밍을 조기 종료합니다 (Stop 버튼 지원).
+     * - Qwen3 등의 <think>...</think> 블록을 제거한 후 반환합니다.
      */
     private async streamWithUI(messages: ChatMessage[]): Promise<string> {
         if (this.context.onStreamStart) this.context.onStreamStart();
 
+        const systemMessage: ChatMessage = { role: 'system', content: AgentEngine.SYSTEM_PROMPT };
+        const fullMessages = [systemMessage, ...messages];
+
         let aiResponse = '';
-        const streamResult = streamChatCompletion(messages);
+        // 현재 숨겨진 블록(<think>, [TOOL_CALL]) 안에 있는지 추적
+        let hiddenDepth = 0;
+
+        const OPEN_RE  = /<think>|\[TOOL_CALL\]/i;
+        const CLOSE_RE = /<\/think>|<\/thinking>|\[\/TOOL_CALL\]/i;
+
+        const streamResult = streamChatCompletion(fullMessages, this.context.abortSignal);
         for await (const chunk of streamResult.content) {
+            if (this.context.abortSignal?.aborted) break;
             aiResponse += chunk;
-            if (this.context.onStreamChunk) this.context.onStreamChunk(chunk);
+
+            // <think> / [TOOL_CALL] 블록을 UI에 실시간으로 숨기고, 그 외 내용만 전달
+            if (this.context.onStreamChunk) {
+                let remaining = chunk;
+                let visibleChunk = '';
+
+                while (remaining.length > 0) {
+                    if (hiddenDepth === 0) {
+                        const m = OPEN_RE.exec(remaining);
+                        if (!m) { visibleChunk += remaining; remaining = ''; }
+                        else {
+                            visibleChunk += remaining.slice(0, m.index);
+                            remaining = remaining.slice(m.index + m[0].length);
+                            hiddenDepth++;
+                        }
+                    } else {
+                        const m = CLOSE_RE.exec(remaining);
+                        if (!m) { remaining = ''; }
+                        else {
+                            remaining = remaining.slice(m.index + m[0].length);
+                            hiddenDepth = Math.max(0, hiddenDepth - 1);
+                        }
+                    }
+                }
+
+                if (visibleChunk) this.context.onStreamChunk(visibleChunk);
+            }
         }
 
         if (this.context.onStreamEnd) this.context.onStreamEnd();
-        return aiResponse;
+        // 전체 응답에서 <think>, [TOOL_CALL] 블록 제거 후 반환
+        return stripThinkingBlocks(aiResponse);
     }
 
     public updateContext(partialContext: Partial<AgentContext>): void {
         this.context = { ...this.context, ...partialContext };
     }
 
+    /**
+     * 새 요청 전에 에이전트 상태를 완전히 초기화합니다.
+     * Agent 모드에서 요청마다 호출하여 이전 실행의 잔류 상태를 제거합니다.
+     */
+    public reset(): void {
+        this.state = 'Idle';
+        this.plan = [];
+        this.currentStepIndex = -1;
+        this.fixAttempts.clear();
+        this.consecutiveMistakeCount = 0;
+        this.lastDiagnostics = [];
+    }
+
+    /**
+     * Plan 모드 전용: AI 응답에서 계획을 파싱하여 사이드바에 표시합니다.
+     * 상태를 변경하거나 실행을 시작하지 않습니다.
+     */
+    public setPlanForDisplay(response: string): void {
+        this.plan = this.planner.parsePlan(response);
+        this.notifyPlanChange();
+        // 의도적으로 state를 'Executing'으로 전환하지 않음 — 계획 표시만
+    }
+
     public stop(): void {
         this.state = 'Idle';
+    }
+
+    /**
+     * 실행 전 pre-flight 검사: SEARCH/REPLACE 액션의 SEARCH 블록이 대상 파일에
+     * 실제로 존재하는지 확인합니다. 불일치 시 현재 파일 내용을 AI에게 제공하고
+     * 즉시 수정을 요청합니다.
+     *
+     * 이를 통해 Executing → Observing → Reflecting → Fixing 전체 사이클 없이
+     * SEARCH 블록 불일치를 사전에 해결합니다 (qwen3/glm/minimax 안정성 향상).
+     */
+    private async preflightCheckAction(action: any, _step: PlanStep): Promise<any> {
+        if (!action) return action;
+
+        if (action.type === 'write') {
+            return await this.checkWriteAction(action);
+        }
+
+        // multi_write — 각 edit 작업을 개별 검사
+        if (action.type === 'multi_write') {
+            const ops: any[] = action.payload?.operations ?? [];
+            const checkedOps: any[] = [];
+            for (const op of ops) {
+                if (op.operation === 'edit' && typeof op.content === 'string' && op.content.includes('<<<<<<< SEARCH')) {
+                    const checked = await this.checkWriteAction({ type: 'write', payload: { path: op.path, content: op.content } });
+                    checkedOps.push({ ...op, content: checked.payload.content });
+                } else {
+                    checkedOps.push(op);
+                }
+            }
+            return { ...action, payload: { ...action.payload, operations: checkedOps } };
+        }
+
+        return action;
+    }
+
+    /** write 액션에서 SEARCH 블록이 파일에 존재하는지 확인하고, 없으면 AI에게 수정 요청 */
+    private async checkWriteAction(action: any): Promise<any> {
+        const content: string = action.payload?.content ?? '';
+        if (!content.includes('<<<<<<< SEARCH')) return action;
+
+        const filePath: string = action.payload?.path ?? '';
+        if (!filePath) return action;
+
+        let currentContent: string;
+        try {
+            currentContent = await this.executor.readFile(filePath);
+        } catch {
+            return action; // 파일 없음 → 새 파일 생성 케이스
+        }
+
+        const searchMatch = content.match(/<<<<<<< SEARCH\n([\s\S]*?)\n?=======/);
+        if (!searchMatch) return action;
+
+        const searchContent = searchMatch[1];
+
+        // exact match 또는 공백 무시 line-trimmed match 확인
+        const searchLines = searchContent.split('\n');
+        const fileLines = currentContent.split('\n');
+        const exactFound = currentContent.includes(searchContent);
+        const trimFound = !exactFound && fileLines.some((_, i) =>
+            fileLines.slice(i, i + searchLines.length)
+                .map(l => l.trim()).join('\n') === searchLines.map(l => l.trim()).join('\n')
+        );
+
+        if (exactFound || trimFound) return action; // ✅ SEARCH 블록 확인됨
+
+        logger.warn('[AgentEngine]', `Pre-flight: SEARCH mismatch in ${filePath} — requesting inline correction`);
+
+        const replaceMatch = content.match(/=======\n([\s\S]*?)\n?>>>>>>>/);
+        const replaceContent = replaceMatch?.[1] ?? '';
+        const filePreview = currentContent.length > 3000
+            ? currentContent.substring(0, 3000) + '\n... (truncated)'
+            : currentContent;
+
+        const fixPrompt = `The SEARCH block does not match the actual content of \`${filePath}\`.
+
+**Current file content** (copy exact lines from here for your SEARCH block):
+\`\`\`
+${filePreview}
+\`\`\`
+
+**Your SEARCH block** (did NOT match):
+\`\`\`
+${searchContent}
+\`\`\`
+
+**Your REPLACE block** (intended change — keep this):
+\`\`\`
+${replaceContent}
+\`\`\`
+
+Provide a corrected JSON action with the SEARCH section exactly matching the current file above.
+Output ONLY valid JSON, no explanation.`;
+
+        const fixResponse = await this.streamWithUI([{ role: 'user', content: fixPrompt }]);
+        const fixJson = extractJsonFromText(fixResponse);
+        if (fixJson) {
+            try {
+                const fixed = JSON.parse(fixJson);
+                logger.info('[AgentEngine]', `Pre-flight: Corrected action for ${filePath}`);
+                return fixed;
+            } catch {
+                logger.warn('[AgentEngine]', 'Pre-flight: Could not parse corrected action, using original');
+            }
+        }
+        return action;
     }
 
     /**

@@ -7,6 +7,23 @@ export class Planner {
      */
     public parsePlan(text: string): PlanStep[] {
         const steps: PlanStep[] = [];
+
+        // JSON 플랜 형식 처리: { "type": "plan", "payload": [...] }
+        // qwen3 등 일부 모델이 마크다운 대신 JSON으로 플랜을 반환하는 경우 대응
+        const jsonStartIdx = text.indexOf('{');
+        if (jsonStartIdx !== -1) {
+            try {
+                const jsonStr = text.slice(jsonStartIdx);
+                const parsed = JSON.parse(jsonStr);
+                if (parsed.type === 'plan' && Array.isArray(parsed.payload)) {
+                    // payload 배열의 각 항목을 마크다운 줄로 변환해 재파싱
+                    text = parsed.payload.join('\n');
+                }
+            } catch {
+                // JSON 파싱 실패 → 기존 마크다운 파싱 경로로 진행
+            }
+        }
+
         const lines = text.split('\n');
 
         let currentStep: Partial<PlanStep> | null = null;

@@ -64,6 +64,21 @@ export function removeTrailingBackticks(content: string): string {
     return cleaned.trimEnd();
 }
 
+/**
+ * Qwen3-235b, DeepSeek-R1 등 추론 모델이 응답 앞에 붙이는
+ * <think>...</think> / <thinking>...</thinking> 블록을 제거합니다.
+ * JSON 추출, Reflection 키워드 매칭 전에 반드시 적용하세요.
+ */
+export function stripThinkingBlocks(text: string): string {
+    if (!text) return text;
+    return text
+        .replace(/<think>[\s\S]*?<\/think>/gi, '')
+        .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+        // minimax / 일부 모델이 사용하는 [TOOL_CALL]...[/TOOL_CALL] 블록 제거
+        .replace(/\[TOOL_CALL\][\s\S]*?\[\/TOOL_CALL\]/gi, '')
+        .trim();
+}
+
 /** AI 응답에 붙는 제어문자 표기(<ctrl46> 등) 및 실제 제어문자 제거 */
 export function removeControlCharacterArtifacts(content: string): string {
     if (!content) return content;
@@ -74,4 +89,15 @@ export function removeControlCharacterArtifacts(content: string): string {
     cleaned = cleaned.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
     cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
     return cleaned.trimEnd();
+}
+
+/**
+ * Qwen3 등 일부 모델이 파일 내용 맨 앞에 붙이는 파이프(|) 아티팩트를 제거합니다.
+ * 패턴: "|\n실제내용" 또는 "| \n실제내용"
+ * 마크다운 테이블의 파이프는 여러 개가 한 줄에 있으므로 단독 | 만 제거합니다.
+ */
+export function removeLeadingPipeArtifact(content: string): string {
+    if (!content) return content;
+    // 맨 앞에 단독 파이프(| 또는 |공백) + 줄바꿈이 있으면 제거
+    return content.replace(/^\|[ \t]*\n/, '');
 }

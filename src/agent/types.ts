@@ -32,6 +32,7 @@ export interface AgentContext {
     maxFixAttempts: number;
     tokenBudget: number;
     extensionContext?: vscode.ExtensionContext; // 체크포인트 관리용
+    abortSignal?: AbortSignal;                  // 사용자 취소 신호 (Stop 버튼)
     onStateChange?: (state: AgentState) => void;
     onPlanChange?: (plan: PlanStep[]) => void;
     onMessage?: (role: string, content: string) => void;

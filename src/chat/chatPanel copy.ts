@@ -1,9 +1,14 @@
 // import * as vscode from 'vscode';
-// import * as path from 'path';
-// import { streamChatCompletion, ChatMessage } from '../api/client.js';
-// import { isConfigured, promptForConfiguration, getAvailableModels, getSelectedModel, setSelectedModel } from '../config/settings.js';
+// import { streamChatCompletion, ChatMessage, isVisionCapable } from '../api/client.js';
+// import { isConfigured, promptForConfiguration, getAvailableModels, getSelectedModel, setSelectedModel, isCheckpointsEnabled } from '../config/settings.js';
 // import { AgentEngine } from '../agent/engine.js';
 // import { AgentContext } from '../agent/types.js';
+// import {
+//     removeAutoExecutionCode,
+//     removeTrailingBackticks,
+//     removeControlCharacterArtifacts,
+// } from '../utils/contentUtils.js';
+// import { logger } from '../utils/logger.js';
 
 // type ChatMode = 'ask' | 'plan' | 'agent';
 
@@ -60,11 +65,14 @@
 //     },
 // ];
 
+// /** Cline 스타일 + prepend/append: 처음/끝에만 추가할 때 다른 코드 건드리지 않음 */
 // interface FileOperation {
-//     type: 'create' | 'edit' | 'delete' | 'read';
+//     type: 'create' | 'edit' | 'delete' | 'read' | 'write_full' | 'replace' | 'prepend' | 'append';
 //     path: string;
 //     content?: string;
 //     description: string;
+//     search?: string;
+//     replace?: string;
 // }
 
 // interface ChatSession {
@@ -124,12 +132,36 @@
 //             history: this.chatHistory,
 //             workspacePath: workspaceFolder?.uri.fsPath || '',
 //             maxFixAttempts: 3,
-//             tokenBudget: 4000,
+//             tokenBudget: 12000,
+//             extensionContext: ChatPanel.extensionContext,
 //             onStateChange: (state) => {
 //                 this.panel.webview.postMessage({ command: 'agentStateChanged', state });
 //             },
 //             onPlanChange: (plan) => {
 //                 this.panel.webview.postMessage({ command: 'updatePlan', plan });
+//             },
+//             onMessage: (role, content) => {
+//                 // Agent 실행 중 메시지 표시 (터미널 실행 결과 등)
+//                 this.panel.webview.postMessage({
+//                     command: 'addMessage',
+//                     role: role,
+//                     content: content
+//                 });
+//             },
+//             onCheckpointCreated: (checkpointId) => {
+//                 logger.info('[ChatPanel]', `Checkpoint created callback: ${checkpointId}`);
+//                 this.panel.webview.postMessage({ command: 'checkpointCreated', checkpointId });
+//                 this.getCheckpoints();
+//             },
+//             // ── 실시간 스트리밍 콜백 ──────────────────────────────────────────
+//             onStreamStart: () => {
+//                 this.panel.webview.postMessage({ command: 'startStreaming' });
+//             },
+//             onStreamChunk: (chunk) => {
+//                 this.panel.webview.postMessage({ command: 'streamChunk', content: chunk });
+//             },
+//             onStreamEnd: () => {
+//                 this.panel.webview.postMessage({ command: 'endStreaming' });
 //             }
 //         };
 //         this.agentEngine = new AgentEngine(context);
@@ -140,9 +172,6 @@
 //             case 'sendMessage':
 //                 await this.handleUserMessage(message.text, message.attachedFiles || [], message.attachedImages || []);
 //                 break;
-//             case 'fileAttached':
-//                 await this.handleFileAttached(message.filePath, message.isDir);
-//                 break;
 //             case 'insertCode':
 //                 await this.insertCodeToEditor(message.code);
 //                 break;
@@ -152,17 +181,29 @@
 //             case 'selectMode':
 //                 this.currentMode = message.mode;
 //                 this.saveChatHistory();
-//                 this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
+//                 this.panel.webview.postMessage({
+//                     command: 'modeChanged',
+//                     mode: this.currentMode,
+//                     checkpointsEnabled: isCheckpointsEnabled()
+//                 });
 //                 break;
 //             case 'ready':
 //                 this.updateModelList();
-//                 this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
+//                 this.panel.webview.postMessage({
+//                     command: 'modeChanged',
+//                     mode: this.currentMode,
+//                     checkpointsEnabled: isCheckpointsEnabled()
+//                 });
 //                 this.sendRestoredHistory();
+//                 // Agent 모드이고 checkpoint가 활성화된 경우에만 체크포인트 로드
+//                 if (this.currentMode === 'agent' && isCheckpointsEnabled()) {
+//                     await this.getCheckpoints();
+//                 }
 //                 break;
 //             case 'getSessions':
 //                 this.panel.webview.postMessage({
 //                     command: 'sessionsList',
-//                     sessions: this.sessions.map(s => ({ id: s.id, title: s.title, timestamp: s.timestamp })),
+//                     sessions: this.sessions.map(s => ({ id: s.id, title: s.title, timestamp: s.timestamp, mode: s.mode })),
 //                     currentSessionId: this.currentSessionId
 //                 });
 //                 break;
@@ -174,7 +215,11 @@
 //                     this.chatHistory = session.messages;
 //                     this.currentMode = session.mode;
 //                     this.panel.webview.postMessage({ command: 'clearMessages' });
-//                     this.panel.webview.postMessage({ command: 'modeChanged', mode: this.currentMode });
+//                     this.panel.webview.postMessage({
+//                         command: 'modeChanged',
+//                         mode: this.currentMode,
+//                         checkpointsEnabled: isCheckpointsEnabled()
+//                     });
 //                     this.sendRestoredHistory();
 //                 }
 //                 break;
@@ -187,9 +232,12 @@
 //                 }
 //                 this.panel.webview.postMessage({
 //                     command: 'sessionsList',
-//                     sessions: this.sessions.map(s => ({ id: s.id, title: s.title, timestamp: s.timestamp })),
+//                     sessions: this.sessions.map(s => ({ id: s.id, title: s.title, timestamp: s.timestamp, mode: s.mode })),
 //                     currentSessionId: this.currentSessionId
 //                 });
+//                 break;
+//             case 'exportSession':
+//                 await this.exportSession(message.sessionId);
 //                 break;
 //             case 'searchFiles':
 //                 await this.searchFiles(message.query);
@@ -239,6 +287,18 @@
 //             case 'searchSlashCommands':
 //                 await this.searchSlashCommands(message.query);
 //                 break;
+//             case 'getCheckpoints':
+//                 await this.getCheckpoints();
+//                 break;
+//             case 'compareCheckpoint':
+//                 await this.compareCheckpoint(message.checkpointId);
+//                 break;
+//             case 'restoreCheckpoint':
+//                 await this.restoreCheckpoint(message.checkpointId, message.restoreWorkspaceOnly || false);
+//                 break;
+//             case 'deleteCheckpoint':
+//                 await this.deleteCheckpoint(message.checkpointId);
+//                 break;
 //         }
 //     }
 
@@ -252,7 +312,7 @@
 
 //         const panel = vscode.window.createWebviewPanel(
 //             ChatPanel.viewType,
-//             'Tokamak AI Chat',
+//             'Tokamak AI Agent',
 //             column,
 //             {
 //                 enableScripts: true,
@@ -260,6 +320,9 @@
 //                 localResourceRoots: [extensionUri],
 //             }
 //         );
+
+//         // 상단 탭에 익스텐션 전용 아이콘 표시
+//         panel.iconPath = vscode.Uri.joinPath(extensionUri, 'images', 'icon.png');
 
 //         ChatPanel.currentPanel = new ChatPanel(panel, extensionUri);
 //     }
@@ -349,6 +412,50 @@
 //                     content: message.content,
 //                 });
 //             }
+//         }
+//     }
+
+//     private async exportSession(sessionId: string): Promise<void> {
+//         const session = this.sessions.find(s => s.id === sessionId);
+//         if (!session) {
+//             vscode.window.showErrorMessage('Session not found');
+//             return;
+//         }
+
+//         try {
+//             // Format session data as JSON
+//             const exportData = {
+//                 title: session.title,
+//                 mode: session.mode,
+//                 timestamp: session.timestamp,
+//                 date: new Date(session.timestamp).toISOString(),
+//                 messages: session.messages.map(msg => ({
+//                     role: msg.role,
+//                     content: typeof msg.content === 'string' ? msg.content :
+//                         Array.isArray(msg.content) ? msg.content.map((item: any) =>
+//                             item.type === 'text' ? item.text : item
+//                         ).join('') : JSON.stringify(msg.content)
+//                 }))
+//             };
+
+//             const jsonContent = JSON.stringify(exportData, null, 2);
+
+//             // Show save dialog
+//             const uri = await vscode.window.showSaveDialog({
+//                 defaultUri: vscode.Uri.file(`tokamak-chat-${session.title.replace(/[^a-z0-9]/gi, '-')}-${sessionId}.json`),
+//                 filters: {
+//                     'JSON': ['json'],
+//                     'All Files': ['*']
+//                 },
+//                 saveLabel: 'Export'
+//             });
+
+//             if (uri) {
+//                 await vscode.workspace.fs.writeFile(uri, Buffer.from(jsonContent, 'utf8'));
+//                 vscode.window.showInformationMessage(`Conversation exported to ${uri.fsPath}`);
+//             }
+//         } catch (error) {
+//             vscode.window.showErrorMessage(`Failed to export session: ${error}`);
 //         }
 //     }
 
@@ -498,7 +605,7 @@
 //                 // File doesn't exist in workspace
 //             }
 //         } catch (error) {
-//             console.error('Error resolving file path:', error);
+//             logger.error('[ChatPanel]', 'Error resolving file path', error);
 //         }
 //     }
 
@@ -702,14 +809,56 @@
 //         }
 //     }
 
+//     /** Load project knowledge from .tokamak/knowledge/ (conventions, architecture, patterns). Included in system prompt for new chats. */
+//     private async getProjectKnowledge(): Promise<string> {
+//         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+//         if (!workspaceFolder) return '';
+
+//         const knowledgeDir = vscode.Uri.joinPath(workspaceFolder.uri, '.tokamak', 'knowledge');
+//         const MAX_KNOWLEDGE_CHARS = 8000;
+
+//         try {
+//             const entries = await vscode.workspace.fs.readDirectory(knowledgeDir);
+//             const textFiles = entries
+//                 .filter(([name, type]) => type === vscode.FileType.File && (name.endsWith('.md') || name.endsWith('.txt')))
+//                 .map(([name]) => name)
+//                 .sort();
+
+//             if (textFiles.length === 0) return '';
+
+//             const parts: string[] = [];
+//             let totalLen = 0;
+
+//             for (const name of textFiles) {
+//                 if (totalLen >= MAX_KNOWLEDGE_CHARS) break;
+//                 const fileUri = vscode.Uri.joinPath(knowledgeDir, name);
+//                 const data = await vscode.workspace.fs.readFile(fileUri);
+//                 const content = Buffer.from(data).toString('utf8').trim();
+//                 if (!content) continue;
+//                 const chunk = `### ${name}\n${content}`;
+//                 const allowed = Math.min(chunk.length, MAX_KNOWLEDGE_CHARS - totalLen);
+//                 if (allowed <= 0) break;
+//                 parts.push(allowed < chunk.length ? chunk.slice(0, allowed) + '\n...(truncated)' : chunk);
+//                 totalLen += chunk.length;
+//             }
+
+//             if (parts.length === 0) return '';
+//             return `\n--- Project Knowledge (.tokamak/knowledge/) ---\nUse the following project-specific context when answering. Follow conventions and patterns described here.\n\n${parts.join('\n\n')}\n`;
+//         } catch {
+//             return '';
+//         }
+//     }
+
 //     private async getSystemPromptForMode(): Promise<string> {
 //         const workspaceInfo = this.getWorkspaceInfo();
 //         const projectStructure = await this.getProjectStructure();
+//         const projectKnowledge = await this.getProjectKnowledge();
 
 //         switch (this.currentMode) {
 //             case 'ask':
 //                 return `You are a helpful coding assistant integrated with VS Code.${workspaceInfo}
 // ${projectStructure}
+// ${projectKnowledge}
 
 // General Rules:
 // - Analyze provided context and the project structure.
@@ -729,6 +878,7 @@
 // --- Project Structure ---
 // The following is the directory structure of the current workspace. Use this to identify files you might need to read.
 // ${projectStructure}
+// ${projectKnowledge}
 
 // Your role is to help the user plan their coding tasks.
 // - Analyze the codebase using the project structure and 'read' operations.
@@ -747,37 +897,56 @@
 //             case 'agent':
 //                 return `You are an autonomous coding agent integrated with VS Code.${workspaceInfo}
 // ${projectStructure}
+// ${projectKnowledge}
 
-// You can perform file operations. When you need to create, edit, or delete files, output them in this EXACT format:
+// You can perform file operations (Cline-style: two clear options for edits).
 
 // <<<FILE_OPERATION>>>
-// TYPE: create|edit|delete|read
+// TYPE: create|write_full|replace|prepend|append|delete|read
 // PATH: relative/path/to/file
 // DESCRIPTION: Brief description of the change
 // CONTENT:
 // \`\`\`
-// actual file content here (for create/edit only)
+// content or diff (see rules below)
 // \`\`\`
 // <<<END_OPERATION>>>
 
+// **Add only at start or end (nothing else is modified):**
+// - **prepend**: Add CONTENT at the very beginning of the file. CONTENT = only the text to add (e.g. "안녕하세요"). Use for: "처음에 X 넣어줘", "맨 앞에 추가", "add X at the beginning".
+// - **append**: Add CONTENT at the very end of the file. CONTENT = only the text to add. Use for: "끝에 X 넣어줘", "맨 뒤에 추가", "add X at the end".
+
+// **Other edits:**
+// - **write_full**: Replace the ENTIRE file. CONTENT = complete new file. Only when user asks to replace/rewrite the whole file. (Do not use this just to edit a small part!)
+// - **edit** or **replace**: Change part of the file. You MUST provide exactly the code to find and the code to replace it with.
+
+// Rules for 'edit' or 'replace':
+// - Do NOT use the old \`<<<<<<< SEARCH\` format. Instead, you MUST use two separate parameters: \`SEARCH:\` (or \`<parameter name="search">\`) for the exact existing code, and \`REPLACE:\` (or \`<parameter name="replace">\`) for the new code.
+// - Provide enough context lines in the SEARCH block to make it uniquely identifiable.
+// - The SEARCH string must exactly match the file content, including all whitespace and indentation.
+// - If you use \`CONTENT:\` for an edit, we will try to fuzzy-match it explicitly to surrounding lines.
+// - 🔴 IMPORTANT FOR TEXT REPLACEMENT 🔴: If the user asks you to "change word A to B" or "rename X to Y" in the middle of a file, you CANNOT just send \`CONTENT: Y\`. You MUST use explicit \`SEARCH: A\` and \`REPLACE: B\` so the system knows what to overwrite. Do NOT use \`CONTENT\` for text replacements!
+
 // Rules:
-// - For 'create', provide the COMPLETE file content.
-// - For 'edit', provide one or more SEARCH/REPLACE blocks. DO NOT provide the complete file content unless necessary.
-// - For 'read', provide the PATH only, and I will show you the content in the next turn.
+// - **"처음에/맨 앞에 X 넣어줘"** → TYPE: prepend, CONTENT: X only.
+// - **"끝에/맨 뒤에 X 넣어줘"** → TYPE: append, CONTENT: X only.
+// - For 'create', CONTENT = complete file. For 'write_full', CONTENT = complete file. For 'read', PATH only.
 
-// SEARCH/REPLACE Block Format:
-// <<<<<<< SEARCH
-// [exact code to find]
-// =======
-// [new code to replace with]
-// >>>>>>> REPLACE
+// Example Edit Format:
+// <<<FILE_OPERATION>>>
+// TYPE: edit
+// PATH: src/utils/helper.ts
+// DESCRIPTION: Update return value
+// SEARCH:
+// \`\`\`typescript
+//   return 'hello';
+// \`\`\`
+// REPLACE:
+// \`\`\`typescript
+//   return 'world';
+// \`\`\`
+// <<<END_OPERATION>>>
 
-// Rules for SEARCH/REPLACE:
-// 1. The SEARCH part must EXACTLY match the code in the file, including indentation and spacing.
-// 2. Provide enough context in the SEARCH block to make it unique.
-// 3. You can have multiple SEARCH/REPLACE blocks in one CONTENT section.
-// 4. Always explain what you're doing before the operations.
-// - Be careful and precise with file paths.
+// - Always explain what you're doing before the operations.
 // - Ask for confirmation if the task is ambiguous.
 
 // Example:
@@ -802,42 +971,320 @@
 
 //     private parseFileOperations(response: string): FileOperation[] {
 //         const operations: FileOperation[] = [];
-//         // 태그 매칭 시 앞뒤 공백이나 대소문자에 더 유연하게 대응
-//         const regex = /<<<FILE_OPERATION>>>([\s\S]*?)(?:<<<END_OPERATION>>>|$)/gi;
-//         let match;
 
-//         while ((match = regex.exec(response)) !== null) {
-//             const block = match[1];
-//             const typeMatch = block.match(/TYPE:\s*(create|edit|delete|read)/i);
-//             const pathMatch = block.match(/PATH:\s*[`'"]?([^`'"\n\r]+)[`'"]?/i);
-//             const descMatch = block.match(/DESCRIPTION:\s*(.+)/i);
+//         // HTML 이스케이프 복원 (웹뷰 등에서 &lt; &gt; 로 올 수 있음)
+//         let raw = response.replace(/&lt;/g, '<').replace(/&gt;/g, '>');
 
-//             // CONTENT 파싱 강화: 백틱 유무와 상관없이 추출 시도
-//             let content: string | undefined;
-//             const contentWithBackticks = block.match(/CONTENT:\s*```[\w]*\n?([\s\S]*?)(?:```|$)/i);
+//         // minimax 등 tool_call: write_to_file (전체 쓰기), replace_in_file (부분 수정), edit (하위 호환)
+//         const param = (name: string) => new RegExp(`<parameter\\s+name=["']${name}["']\\s*[^>]*>([\\s\\S]*?)<\\/parameter>`, 'i');
+//         const parseInvoke = (inner: string, toolType: 'write_full' | 'replace' | 'edit' | 'prepend' | 'append') => {
+//             const pathMatch = inner.match(param('path'));
+//             const descMatch = inner.match(param('description'));
+//             const contentMatch = inner.match(param('CONTENT')) ?? inner.match(param('content'));
+//             const diffMatch = inner.match(param('diff'));
+//             const body = contentMatch?.[1]?.trim() ?? diffMatch?.[1]?.trim();
 
-//             if (contentWithBackticks) {
-//                 content = contentWithBackticks[1];
-//             } else {
-//                 // 백틱이 없는 경우 CONTENT: 다음부터 블록 끝까지(또는 다음 필드 전까지)를 내용으로 간주
-//                 const plainContentMatch = block.match(/CONTENT:\s*([\s\S]+)$/i);
-//                 if (plainContentMatch) {
-//                     content = plainContentMatch[1].trim();
+//             const searchMatch = inner.match(param('search')) ?? inner.match(param('search_text'));
+//             const replaceMatch = inner.match(param('replace')) ?? inner.match(param('replace_text'));
+//             const searchCode = searchMatch?.[1]?.trim();
+//             const replaceCode = replaceMatch?.[1]?.trim();
+
+//             if (pathMatch && (body || (searchCode && replaceCode))) {
+//                 const path = pathMatch[1].replace(/<[^>]+>/g, '').trim();
+//                 const description = descMatch ? descMatch[1].replace(/<[^>]+>/g, '').trim() : '';
+//                 operations.push({
+//                     type: toolType,
+//                     path,
+//                     description,
+//                     content: body,
+//                     search: searchCode,
+//                     replace: replaceCode
+//                 });
+//             }
+//         };
+//         const invokeNames: [RegExp, 'write_full' | 'replace' | 'edit' | 'prepend' | 'append'][] = [
+//             [/<invoke\s+name=["']write_to_file["']\s*>/gi, 'write_full'],
+//             [/<invoke\s+name=["']replace_in_file["']\s*>/gi, 'replace'],
+//             [/<invoke\s+name=["']prepend["']\s*>/gi, 'prepend'],
+//             [/<invoke\s+name=["']append["']\s*>/gi, 'append'],
+//             [/<invoke\s+name=["']edit["']\s*>/gi, 'edit'],
+//         ];
+//         for (const [invokeRe, toolType] of invokeNames) {
+//             let m: RegExpExecArray | null;
+//             while ((m = invokeRe.exec(raw)) !== null) {
+//                 const afterInvoke = raw.slice(m.index + m[0].length);
+//                 const closeIdx = afterInvoke.search(/<\s*\/\s*invoke\s*>/i);
+//                 const inner = closeIdx >= 0 ? afterInvoke.slice(0, closeIdx) : afterInvoke;
+//                 parseInvoke(inner, toolType);
+//             }
+//         }
+
+//         // 위에서 못 찾았고, 응답이 ```...``` 블록 하나로 감싸진 경우 한 번 더 시도
+//         if (operations.length === 0 && /<invoke\s+name=["']edit["']/i.test(raw)) {
+//             const m = raw.match(/```\w*\s*\n([\s\S]*?)```/);
+//             if (m && /<parameter\s+name=["']path["']/i.test(m[1])) {
+//                 const innerRaw = m[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+//                 const inv = /<invoke\s+name=["']edit["']\s*>/gi.exec(innerRaw);
+//                 if (inv) {
+//                     const afterInvoke = innerRaw.slice(inv.index + inv[0].length);
+//                     const closeIdx = afterInvoke.search(/<\s*\/\s*invoke\s*>/i);
+//                     const inner = closeIdx >= 0 ? afterInvoke.slice(0, closeIdx) : afterInvoke;
+//                     const param = (name: string) => new RegExp(`<parameter\\s+name=["']${name}["']\\s*[^>]*>([\\s\\S]*?)<\\/parameter>`, 'i');
+//                     const pathMatch = inner.match(param('path'));
+//                     const descMatch = inner.match(param('description'));
+//                     const contentMatch = inner.match(param('CONTENT')) ?? inner.match(param('content'));
+//                     const searchMatch = inner.match(param('search')) ?? inner.match(param('search_text'));
+//                     const replaceMatch = inner.match(param('replace')) ?? inner.match(param('replace_text'));
+
+//                     const body = contentMatch?.[1]?.trim();
+//                     const searchCode = searchMatch?.[1]?.trim();
+//                     const replaceCode = replaceMatch?.[1]?.trim();
+
+//                     if (pathMatch && (body || (searchCode && replaceCode))) {
+//                         const path = pathMatch[1].replace(/<[^>]+>/g, '').trim();
+//                         const description = descMatch ? descMatch[1].replace(/<[^>]+>/g, '').trim() : '';
+//                         operations.push({
+//                             type: 'edit',
+//                             path,
+//                             description,
+//                             content: body,
+//                             search: searchCode,
+//                             replace: replaceCode
+//                         });
+//                     }
 //                 }
 //             }
+//         }
+
+//         // 개선된 파싱: FILE_OPERATION 블록을 더 정확하게 찾기
+//         // END_OPERATION 태그를 명시적으로 찾되, 없으면 다음 FILE_OPERATION 전까지 또는 문자열 끝까지
+//         const startPositions: number[] = [];
+//         const startRegex = /<<<FILE_OPERATION>>>/gi;
+//         let match;
+//         while ((match = startRegex.exec(raw)) !== null) {
+//             startPositions.push(match.index);
+//         }
+
+//         // 각 시작 위치에서 블록 파싱
+//         for (let i = 0; i < startPositions.length; i++) {
+//             const blockStart = startPositions[i] + '<<<FILE_OPERATION>>>'.length;
+
+//             // 다음 FILE_OPERATION 위치 찾기
+//             const nextStartPos = i < startPositions.length - 1 ? startPositions[i + 1] : raw.length;
+
+//             // END_OPERATION 태그 찾기 (blockStart부터 nextStartPos 전까지)
+//             const searchEnd = Math.min(nextStartPos, raw.length);
+//             const searchText = raw.substring(blockStart, searchEnd);
+//             const endRegex = /<<<END_OPERATION>>>/gi;
+//             const endMatch = endRegex.exec(searchText);
+
+//             let blockEnd: number;
+//             if (endMatch) {
+//                 // END_OPERATION 태그가 있으면 그 전까지 (blockStart 기준으로 인덱스 조정)
+//                 blockEnd = blockStart + endMatch.index;
+//             } else {
+//                 // END_OPERATION이 없으면 다음 FILE_OPERATION 전까지 또는 문자열 끝까지
+//                 blockEnd = nextStartPos;
+//             }
+
+//             const block = raw.substring(blockStart, blockEnd);
+
+//             const typeMatch = block.match(/TYPE:\s*(create|edit|delete|read|write_full|replace|prepend|append)/i);
+//             const pathMatch = block.match(/PATH:\s*[`'"]?([^`'"\n\r]+)[`'"]?/i);
+//             const descMatch = block.match(/DESCRIPTION:\s*(.+?)(?:\nCONTENT:|$)/is);
+
+//             const extractField = (fieldName: string): string | undefined => {
+//                 const startMatch = block.match(new RegExp(`${fieldName}:\\s*`, 'i'));
+//                 if (!startMatch) return undefined;
+
+//                 const startIdx = startMatch.index! + startMatch[0].length;
+//                 // Find next possible field marker or end of block
+//                 let endIdx = block.length;
+//                 const nextFieldMatch = block.substring(startIdx).match(/\n(CONTENT|SEARCH|REPLACE|DESCRIPTION|PATH|TYPE):\s*/i);
+//                 if (nextFieldMatch) {
+//                     endIdx = startIdx + nextFieldMatch.index!;
+//                 }
+
+//                 let text = block.substring(startIdx, endIdx).trim();
+
+//                 if (text.startsWith('```')) {
+//                     const firstNewline = text.indexOf('\n');
+//                     if (firstNewline > 0) {
+//                         text = text.substring(firstNewline + 1);
+//                     } else {
+//                         text = text.substring(3).trim();
+//                     }
+
+//                     let lastBacktickIndex = -1;
+//                     const lines = text.split('\n');
+//                     for (let i = lines.length - 1; i >= 0; i--) {
+//                         const trimmedLine = lines[i].trim();
+//                         if (trimmedLine === '```' || trimmedLine.startsWith('```')) {
+//                             lastBacktickIndex = text.lastIndexOf('\n' + lines[i]);
+//                             if (lastBacktickIndex === -1) {
+//                                 lastBacktickIndex = text.indexOf(lines[i]);
+//                             }
+//                             break;
+//                         }
+//                     }
+
+//                     if (lastBacktickIndex >= 0) {
+//                         text = text.substring(0, lastBacktickIndex).trim();
+//                     } else {
+//                         text = text.trim();
+//                         text = text.replace(/\n*```+\s*$/m, '').replace(/```+\s*$/m, '');
+//                     }
+//                     text = text.replace(/\n*```+\s*$/m, '').trimEnd();
+//                 } else {
+//                     text = text.trim();
+//                 }
+
+//                 return text;
+//             };
+
+//             const content = extractField('CONTENT');
+//             const search = extractField('SEARCH');
+//             const replace = extractField('REPLACE');
 
 //             if (typeMatch && pathMatch) {
-//                 const type = typeMatch[1].toLowerCase() as 'create' | 'edit' | 'delete' | 'read';
+//                 const type = typeMatch[1].toLowerCase() as FileOperation['type'];
 //                 operations.push({
 //                     type: type,
 //                     path: pathMatch[1].trim(),
 //                     description: descMatch ? descMatch[1].trim() : '',
 //                     content: content,
+//                     search: search,
+//                     replace: replace
 //                 });
 //             }
 //         }
 
+//         // 자동 실행 코드 제거, 백틱 정리, 제어문자 표기 제거
+//         for (const op of operations) {
+//             if (op.content && (op.type === 'create' || op.type === 'edit' || op.type === 'write_full' || op.type === 'replace' || op.type === 'prepend' || op.type === 'append')) {
+//                 op.content = removeAutoExecutionCode(op.content, op.path);
+//                 op.content = removeTrailingBackticks(op.content);
+//                 op.content = removeControlCharacterArtifacts(op.content);
+//             }
+//         }
+
 //         return operations;
+//     }
+
+//     /** AI가 SEARCH 블록 없이 코드를 보냈을 때, 앞/뒤 줄을 기준으로 바꿔치기를 시도하는 헬퍼 함수 */
+//     private applySnippetFallback(existingContent: string, proposedContent: string): string | null {
+//         if (!proposedContent || !existingContent) return null;
+
+//         // 단순히 통째로 포함되어 있다면 이미 적용된 것과 같음
+//         if (existingContent.includes(proposedContent)) {
+//             return existingContent;
+//         }
+
+//         const proposedLinesOriginal = proposedContent.split('\n');
+//         const existLinesOriginal = existingContent.split(/\r?\n/); // Handle potential windows endings from file
+
+//         const proposedLinesTrimmed = proposedLinesOriginal.map(l => l.trim());
+//         const existLinesTrimmed = existLinesOriginal.map(l => l.trim());
+
+//         let bestStartIdx = -1;
+//         let bestEndIdx = -1;
+//         let maxScore = -Infinity;
+
+//         // 양 끝에서 검색할 최대 깊이 (추가된 코드가 많을 수 있으므로 최대 50줄까지)
+//         const maxAnchorDepth = Math.min(50, proposedLinesOriginal.length);
+
+//         for (let propStart = 0; propStart < maxAnchorDepth; propStart++) {
+//             const startStr = proposedLinesTrimmed[propStart];
+//             if (startStr.length === 0) continue;
+
+//             const startCandidates = [];
+//             for (let i = 0; i < existLinesTrimmed.length; i++) {
+//                 if (existLinesTrimmed[i] === startStr) startCandidates.push(i);
+//             }
+//             if (startCandidates.length === 0) continue;
+
+//             for (let propEnd = proposedLinesOriginal.length - 1; propEnd >= Math.max(0, proposedLinesOriginal.length - maxAnchorDepth); propEnd--) {
+//                 const endStr = proposedLinesTrimmed[propEnd];
+//                 if (endStr.length === 0) continue;
+
+//                 if (propStart > propEnd) break;
+
+//                 for (const startIdx of startCandidates) {
+//                     for (let endIdx = startIdx; endIdx < existLinesTrimmed.length; endIdx++) {
+//                         if (existLinesTrimmed[endIdx] === endStr) {
+//                             const replacedLinesCount = endIdx - startIdx + 1;
+//                             const proposedLinesCount = propEnd - propStart + 1;
+//                             const diff = Math.abs(replacedLinesCount - proposedLinesCount);
+
+//                             // 점수: 잡아낸 블록의 범위(propEnd - propStart)가 넓을수록 높은 점수 부여
+//                             // 서로 다른 점수일 경우, 차이(diff)가 적을수록 높은 점수 부여
+//                             const score = (propEnd - propStart) * 10000 - diff;
+
+//                             if (score > maxScore) {
+//                                 // 안전장치: 너무 많은 코드가 삭제되는 구간은 거부 (기존 20줄 이상 삭제되며, 새 코드가 삭제되는 코드의 30% 미만)
+//                                 if (!(replacedLinesCount > 20 && proposedLinesCount < replacedLinesCount * 0.3)) {
+//                                     maxScore = score;
+//                                     bestStartIdx = startIdx;
+//                                     bestEndIdx = endIdx;
+//                                 }
+//                             }
+//                         }
+//                     }
+//                 }
+//             }
+//         }
+
+//         if (bestStartIdx !== -1 && bestEndIdx !== -1 && bestEndIdx >= bestStartIdx) {
+//             const newLines = [
+//                 ...existLinesOriginal.slice(0, bestStartIdx),
+//                 proposedContent,
+//                 ...existLinesOriginal.slice(bestEndIdx + 1)
+//             ];
+//             return newLines.join('\n');
+//         }
+
+//         // --- Single-line similarity fallback ---
+//         // 만약 제안된 코드가 단 1~2줄이고 문맥이 부족하여 매칭에 실패했다면,
+//         // 기존 텍스트 중 "가장 비슷한 줄"을 찾아 통째로 교체합니다 (오타 수정 등에 유용).
+//         if (proposedLinesTrimmed.length === 1 && proposedLinesTrimmed[0].length > 4) {
+//             const proposedStr = proposedLinesTrimmed[0];
+//             let bestSimScore = -1;
+//             let bestSimIdx = -1;
+
+//             for (let i = 0; i < existLinesTrimmed.length; i++) {
+//                 const existStr = existLinesTrimmed[i];
+//                 if (existStr.length < 3) continue;
+
+//                 // 간단한 공통 단어/문자 비율 계산 (자카드 유사도와 유사)
+//                 // 완벽한 Levenshtein 대신 O(N^2) 문자열 공통 길이 탐색 등 (여기서는 대략 길이 비율)
+//                 let commonChars = 0;
+//                 for (let c = 0; c < proposedStr.length; c++) {
+//                     if (existStr.includes(proposedStr[c])) commonChars++;
+//                 }
+//                 const score = commonChars / Math.max(existStr.length, proposedStr.length);
+
+//                 // 단순 길이 기반 score보다는 "차집합이 적을 것"을 요구
+//                 const diffLen = Math.abs(existStr.length - proposedStr.length);
+//                 if (score > 0.8 && diffLen < 15 && diffLen < proposedStr.length * 0.5) {
+//                     if (score > bestSimScore) {
+//                         bestSimScore = score;
+//                         bestSimIdx = i;
+//                     }
+//                 }
+//             }
+
+//             if (bestSimIdx !== -1) {
+//                 // 한 줄 교체
+//                 const newLines = [
+//                     ...existLinesOriginal.slice(0, bestSimIdx),
+//                     proposedContent,
+//                     ...existLinesOriginal.slice(bestSimIdx + 1)
+//                 ];
+//                 return newLines.join('\n');
+//             }
+//         }
+
+//         return null;
 //     }
 
 //     private async applyFileOperations(): Promise<void> {
@@ -864,43 +1311,184 @@
 //                         }
 //                         break;
 
-//                     case 'edit':
+//                     case 'write_full':
 //                         if (op.content !== undefined) {
 //                             const existingData = await vscode.workspace.fs.readFile(fileUri);
-//                             let currentContent = Buffer.from(existingData).toString('utf8');
+//                             const currentContent = Buffer.from(existingData).toString('utf8');
+//                             const existingLines = currentContent.split(/\r?\n/).length;
+//                             // 안전장치: 제안 내용이 기존보다 지나치게 짧으면 대량 삭제로 간주하고 적용 안 함
+//                             if (currentContent.length > 200 && op.content.length < currentContent.length * 0.5) {
+//                                 vscode.window.showErrorMessage(
+//                                     `[write_full] ${op.path}: 제안 내용이 기존 파일보다 훨씬 짧아 대량 삭제가 발생할 수 있습니다. 적용하지 않습니다. "처음에/끝에 넣어줘"는 replace(SEARCH/REPLACE)를 사용하세요.`
+//                                 );
+//                                 errorCount++;
+//                                 break;
+//                             }
+//                             edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(existingLines + 1, 0)), op.content);
+//                             successCount++;
+//                         }
+//                         break;
 
-//                             if (op.content.includes('<<<<<<< SEARCH')) {
-//                                 const blocks = op.content.split(/>>>>>>> REPLACE\s*/);
-//                                 let anyApplied = false;
+//                     case 'prepend':
+//                         if (op.content !== undefined) {
+//                             const existingData = await vscode.workspace.fs.readFile(fileUri);
+//                             const currentContent = Buffer.from(existingData).toString('utf8');
+//                             const newContent = op.content.trim() + '\n\n' + currentContent;
+//                             const docLines = currentContent.split(/\r?\n/).length;
+//                             edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)), newContent);
+//                             successCount++;
+//                         }
+//                         break;
 
-//                                 for (const block of blocks) {
-//                                     if (!block.includes('<<<<<<< SEARCH')) continue;
-//                                     const parts = block.split(/=======/);
-//                                     if (parts.length !== 2) continue;
+//                     case 'append':
+//                         if (op.content !== undefined) {
+//                             const existingData = await vscode.workspace.fs.readFile(fileUri);
+//                             const currentContent = Buffer.from(existingData).toString('utf8');
+//                             const newContent = currentContent.trimEnd() + '\n\n' + op.content.trim();
+//                             const docLines = currentContent.split(/\r?\n/).length;
+//                             edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)), newContent);
+//                             successCount++;
+//                         }
+//                         break;
 
-//                                     const searchPart = parts[0].split(/<<<<<<< SEARCH\s*/)[1];
-//                                     const replacePart = parts[1];
+//                     case 'replace':
+//                     case 'edit':
+//                         const existingData = await vscode.workspace.fs.readFile(fileUri);
+//                         let currentContent = Buffer.from(existingData).toString('utf8');
 
-//                                     if (searchPart && replacePart) {
-//                                         const trimmedSearch = searchPart.trim();
-//                                         if (currentContent.includes(trimmedSearch)) {
-//                                             currentContent = currentContent.replace(trimmedSearch, replacePart.trim());
-//                                             anyApplied = true;
-//                                         }
-//                                     }
-//                                 }
+//                         let anyApplied = false;
 
-//                                 if (anyApplied) {
-//                                     const docLines = currentContent.split('\n').length;
-//                                     edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)), currentContent);
-//                                     successCount++;
+//                         // 1. Explicit SEARCH and REPLACE parameters natively parsed
+//                         if (op.search && op.replace !== undefined) {
+//                             let trimmedSearch = removeControlCharacterArtifacts(op.search);
+//                             let trimmedReplace = removeControlCharacterArtifacts(op.replace);
+
+//                             if (trimmedSearch !== trimmedReplace) {
+//                                 const searchLines = trimmedSearch.split('\n').length;
+//                                 const replaceLines = trimmedReplace.split('\n').length;
+//                                 const searchLength = trimmedSearch.length;
+//                                 const replaceLength = trimmedReplace.length;
+
+//                                 if (trimmedReplace === '' || (searchLines > 3 && replaceLines === 0) || (searchLength > 100 && replaceLength < searchLength * 0.3)) {
+//                                     vscode.window.showWarningMessage(`⚠️ 의심스러운 코드 삭제 감지: ${op.path}. 스킵합니다.`, '확인');
+//                                 } else if (currentContent.includes(trimmedSearch)) {
+//                                     currentContent = currentContent.replace(trimmedSearch, trimmedReplace);
+//                                     anyApplied = true;
 //                                 } else {
-//                                     throw new Error(`No matching SEARCH blocks found in ${op.path}`);
+//                                     vscode.window.showErrorMessage(`[${op.type}] ${op.path}: 찾을 코드가 파일 내에 정확히 존재하지 않습니다 (띄어쓰기/들여쓰기 확인 필요).`);
+//                                     errorCount++;
+//                                     break;
 //                                 }
 //                             } else {
-//                                 const docLines = currentContent.split('\n').length;
-//                                 edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)), op.content);
-//                                 successCount++;
+//                                 anyApplied = true; // No-op but successful
+//                             }
+//                         }
+//                         // 2. Legacy <<<<<<< SEARCH inside content
+//                         else if (op.content !== undefined && op.content.includes('<<<<<<< SEARCH')) {
+//                             const blocks = op.content.split(/>>>>>>> REPLACE\s*/);
+//                             for (const block of blocks) {
+//                                 if (!block.includes('<<<<<<< SEARCH')) continue;
+//                                 const parts = block.split(/=======/);
+//                                 if (parts.length !== 2) continue;
+
+//                                 let trimmedSearch = removeControlCharacterArtifacts(parts[0].split(/<<<<<<< SEARCH\s*/)[1].trim());
+//                                 let trimmedReplace = removeControlCharacterArtifacts(parts[1].trim());
+
+//                                 if (trimmedSearch && trimmedReplace !== undefined) {
+//                                     if (trimmedSearch === trimmedReplace) {
+//                                         anyApplied = true;
+//                                         continue;
+//                                     }
+//                                     const searchLines = trimmedSearch.split('\n').length;
+//                                     const replaceLines = trimmedReplace.split('\n').length;
+//                                     const searchLength = trimmedSearch.length;
+//                                     const replaceLength = trimmedReplace.length;
+
+//                                     if (trimmedReplace === '' || (searchLines > 3 && replaceLines === 0) || (searchLength > 100 && replaceLength < searchLength * 0.3)) {
+//                                         vscode.window.showWarningMessage(`⚠️ 의심스러운 코드 삭제 감지: ${op.path}. 스킵합니다.`, '확인');
+//                                         continue;
+//                                     }
+
+//                                     if (currentContent.includes(trimmedSearch)) {
+//                                         currentContent = currentContent.replace(trimmedSearch, trimmedReplace);
+//                                         anyApplied = true;
+//                                     }
+//                                 }
+//                             }
+//                         }
+//                         // 3. Description 기반 단순 텍스트 교체 (LLM이 content만 주고 search를 안 준 경우에 대한 스마트 폴백)
+//                         else if (op.content !== undefined) {
+//                             let smartFallbackSuccess = false;
+
+//                             // description에서 "Change A to B", "Replace A with B" 패턴 추출
+//                             if (op.description && currentContent.includes(op.content)) {
+//                                 // 이미 변경되었다고 간주
+//                                 anyApplied = true;
+//                                 smartFallbackSuccess = true;
+//                             } else if (op.description && typeof op.description === 'string') {
+//                                 const desc = op.description.trim();
+//                                 let extractedSearch = '';
+//                                 let extractedReplace = '';
+
+//                                 const changeMatch = desc.match(/^change\s+(.+?)\s+to\s+(.+)$/i);
+//                                 const replaceMatch = desc.match(/^replace\s+(.+?)\s+with\s+(.+)$/i);
+//                                 const koreanMatch1 = desc.match(/^'?"?(.+?)'?"?\s*[을를]\s*'?"?(.+?)'?"?\s*[으]?로\s*(변경|수정|대체)/);
+//                                 const arrowMatch = desc.match(/(.+?)\s*(?:->|=>)\s*(.+)/);
+
+//                                 if (changeMatch) {
+//                                     extractedSearch = changeMatch[1];
+//                                     extractedReplace = changeMatch[2];
+//                                 } else if (replaceMatch) {
+//                                     extractedSearch = replaceMatch[1];
+//                                     extractedReplace = replaceMatch[2];
+//                                 } else if (koreanMatch1) {
+//                                     extractedSearch = koreanMatch1[1];
+//                                     extractedReplace = koreanMatch1[2];
+//                                 } else if (arrowMatch) {
+//                                     extractedSearch = arrowMatch[1];
+//                                     extractedReplace = arrowMatch[2];
+//                                 }
+
+//                                 if (extractedSearch && currentContent.includes(extractedSearch)) {
+//                                     // LLM이 content를 엉뚱하게 줬을 수도 있으니, extractedReplace를 우선으로 쓰되, 
+//                                     // op.content가 명시되어 있다면 op.content가 더 정확할 수 있으므로 op.content로 대체
+//                                     const replacement = op.content.length > 0 ? op.content : extractedReplace;
+//                                     currentContent = currentContent.replace(extractedSearch, replacement);
+//                                     anyApplied = true;
+//                                     smartFallbackSuccess = true;
+//                                 }
+//                             }
+
+//                             if (!smartFallbackSuccess) {
+//                                 // 기존의 applySnippetFallback 로직 (문맥 기반)
+//                                 const fallbackContent = this.applySnippetFallback(currentContent, op.content);
+//                                 if (fallbackContent !== null) {
+//                                     currentContent = fallbackContent;
+//                                     anyApplied = true;
+//                                 } else {
+//                                     // Fallback도 실패했을 때
+//                                     if (currentContent.length > 200 && op.content.length < currentContent.length * 0.5) {
+//                                         vscode.window.showErrorMessage(
+//                                             `[${op.type}] ${op.path}: AI가 잘못된 포맷으로 코드 수정(일부분)만 요청했습니다. 기존 코드의 어떤 부분을 수정할지 시스템이 찾지 못해 차단합니다. AI에게 명확한 SEARCH/REPLACE 블록을 사용하라고 다시 지시해주세요.`
+//                                         );
+//                                         errorCount++;
+//                                         break;
+//                                     } else {
+//                                         // 파일 내용을 통째로 새로 쓴 경우에만 덮어쓰기 허용
+//                                         currentContent = op.content;
+//                                         anyApplied = true;
+//                                     }
+//                                 }
+//                             }
+//                         }
+
+//                         if (anyApplied) {
+//                             const docLines = currentContent.split(/\r?\n/).length;
+//                             edit.replace(fileUri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(docLines + 1, 0)), currentContent);
+//                             successCount++;
+//                         } else {
+//                             if (op.content || (op.search && op.replace !== undefined)) {
+//                                 throw new Error(`[${op.type}] 수행 실패: 매칭되는 부분을 찾을 수 없거나 파일 보호 차단됨 (${op.path})`);
 //                             }
 //                         }
 //                         break;
@@ -912,7 +1500,7 @@
 //                 }
 //             } catch (error) {
 //                 errorCount++;
-//                 console.error(`Failed to stage ${op.type} for ${op.path}:`, error);
+//                 logger.error('[ChatPanel]', `Failed to stage ${op.type} for ${op.path}`, error);
 //             }
 //         }
 
@@ -921,10 +1509,42 @@
 
 //         if (success) {
 //             if (successCount > 0) {
-//                 vscode.window.showInformationMessage(`Successfully applied ${successCount} file operation(s).`);
+//                 // 수정된 파일들을 명시적으로 저장
+//                 const modifiedFiles: vscode.Uri[] = [];
+//                 for (const op of this.pendingOperations) {
+//                     if (op.type === 'create' || op.type === 'edit' || op.type === 'write_full' || op.type === 'replace' || op.type === 'prepend' || op.type === 'append') {
+//                         const fileUri = vscode.Uri.joinPath(workspaceFolder.uri, op.path);
+//                         modifiedFiles.push(fileUri);
+//                     }
+//                 }
+
+//                 // 각 파일을 저장 (이미 열려있거나 새로 생성된 파일)
+//                 for (const fileUri of modifiedFiles) {
+//                     try {
+//                         // 파일이 이미 열려있으면 저장, 없으면 열어서 저장
+//                         const doc = await vscode.workspace.openTextDocument(fileUri);
+//                         // WorkspaceEdit 후 명시적으로 저장
+//                         await doc.save();
+//                     } catch (error) {
+//                         // 파일이 저장할 수 없는 경우 FileSystem API로 직접 저장
+//                         try {
+//                             const op = this.pendingOperations.find(p => {
+//                                 const opUri = vscode.Uri.joinPath(workspaceFolder.uri, p.path);
+//                                 return opUri.toString() === fileUri.toString();
+//                             });
+//                             if (op && op.content !== undefined) {
+//                                 await vscode.workspace.fs.writeFile(fileUri, Buffer.from(op.content, 'utf8'));
+//                             }
+//                         } catch (fsError) {
+//                             logger.error('[ChatPanel]', `Failed to save ${fileUri.fsPath}`, fsError);
+//                         }
+//                     }
+//                 }
+
+//                 vscode.window.showInformationMessage(`Successfully applied and saved ${successCount} file operation(s).`);
 //             }
 //         } else {
-//             console.error('[ChatPanel] WorkspaceEdit failed. Check for read-only files or conflicting edits.');
+//             logger.error('[ChatPanel]', 'WorkspaceEdit failed. Check for read-only files or conflicting edits.');
 //             if (successCount > 0) {
 //                 vscode.window.showErrorMessage(`Failed to apply ${successCount} operation(s) via WorkspaceEdit. Please verify file permissions.`);
 //             } else if (errorCount > 0) {
@@ -934,6 +1554,175 @@
 
 //         this.pendingOperations = [];
 //         this.panel.webview.postMessage({ command: 'operationsCleared' });
+//     }
+
+//     private async getCheckpoints(): Promise<void> {
+//         if (!this.agentEngine) {
+//             logger.info('[ChatPanel]', 'getCheckpoints: agentEngine not available');
+//             this.panel.webview.postMessage({
+//                 command: 'checkpointsList',
+//                 checkpoints: []
+//             });
+//             return;
+//         }
+
+//         const checkpointManager = this.agentEngine.getCheckpointManager();
+//         if (!checkpointManager) {
+//             logger.info('[ChatPanel]', 'getCheckpoints: checkpointManager not available');
+//             this.panel.webview.postMessage({
+//                 command: 'checkpointsList',
+//                 checkpoints: []
+//             });
+//             return;
+//         }
+
+//         const checkpoints = checkpointManager.getCheckpoints();
+//         logger.info('[ChatPanel]', `getCheckpoints: found ${checkpoints.length} checkpoints`);
+//         this.panel.webview.postMessage({
+//             command: 'checkpointsList',
+//             checkpoints: checkpoints.map(cp => ({
+//                 id: cp.id,
+//                 timestamp: cp.timestamp,
+//                 stepDescription: cp.stepDescription,
+//                 stepId: cp.stepId,
+//                 fileCount: cp.workspaceSnapshot.files.length,
+//             }))
+//         });
+//     }
+
+//     private async compareCheckpoint(checkpointId: string): Promise<void> {
+//         if (!this.agentEngine) {
+//             return;
+//         }
+
+//         const checkpointManager = this.agentEngine.getCheckpointManager();
+//         if (!checkpointManager) {
+//             vscode.window.showErrorMessage('Checkpoint manager not available');
+//             return;
+//         }
+
+//         try {
+//             const diffs = await checkpointManager.compareWithCurrent(checkpointId);
+
+//             if (diffs.length === 0) {
+//                 vscode.window.showInformationMessage('No differences found between checkpoint and current workspace.');
+//                 return;
+//             }
+
+//             // Diff 뷰 표시
+//             const checkpoint = checkpointManager.getCheckpoints().find(cp => cp.id === checkpointId);
+//             if (!checkpoint) {
+//                 return;
+//             }
+
+//             // 첫 번째 변경된 파일의 diff 표시
+//             const firstDiff = diffs[0];
+//             const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+//             if (!workspaceFolder) {
+//                 return;
+//             }
+
+//             const currentUri = vscode.Uri.joinPath(workspaceFolder.uri, firstDiff.path);
+//             const snapshotUri = vscode.Uri.parse(`tokamak-checkpoint:${checkpointId}/${firstDiff.path}`);
+
+//             // TextDocumentContentProvider로 스냅샷 내용 제공
+//             const provider = new (class implements vscode.TextDocumentContentProvider {
+//                 provideTextDocumentContent(uri: vscode.Uri): string {
+//                     const [, cpId, ...pathParts] = uri.path.split('/');
+//                     const filePath = pathParts.join('/');
+//                     const cp = checkpointManager.getCheckpoints().find(c => c.id === cpId);
+//                     const fileSnapshot = cp?.workspaceSnapshot.files.find(f => f.path === filePath);
+//                     return fileSnapshot?.content || '';
+//                 }
+//             })();
+
+//             const disposable = vscode.workspace.registerTextDocumentContentProvider('tokamak-checkpoint', provider);
+//             await vscode.commands.executeCommand('vscode.diff', snapshotUri, currentUri, `[CHECKPOINT] ${firstDiff.path}`);
+//             setTimeout(() => disposable.dispose(), 10000);
+
+//             if (diffs.length > 1) {
+//                 vscode.window.showInformationMessage(
+//                     `${diffs.length} files changed. Showing first file. Use checkpoint panel to view others.`
+//                 );
+//             }
+//         } catch (error) {
+//             vscode.window.showErrorMessage(`Failed to compare checkpoint: ${error}`);
+//         }
+//     }
+
+//     private async restoreCheckpoint(checkpointId: string, workspaceOnly: boolean): Promise<void> {
+//         if (!this.agentEngine) {
+//             return;
+//         }
+
+//         const checkpointManager = this.agentEngine.getCheckpointManager();
+//         if (!checkpointManager) {
+//             vscode.window.showErrorMessage('Checkpoint manager not available');
+//             return;
+//         }
+
+//         try {
+//             const checkpoint = checkpointManager.getCheckpoints().find(cp => cp.id === checkpointId);
+//             if (!checkpoint) {
+//                 vscode.window.showErrorMessage('Checkpoint not found');
+//                 return;
+//             }
+
+//             const confirmed = await vscode.window.showWarningMessage(
+//                 `Are you sure you want to restore checkpoint "${checkpoint.stepDescription || checkpointId}"? ` +
+//                 `This will ${workspaceOnly ? 'restore workspace files only' : 'restore workspace and task state'}.`,
+//                 { modal: true },
+//                 'Yes',
+//                 'Cancel'
+//             );
+
+//             if (confirmed === 'Yes') {
+//                 await checkpointManager.restoreCheckpoint(checkpointId, workspaceOnly);
+
+//                 if (!workspaceOnly && checkpoint.planSnapshot) {
+//                     // Plan도 복원
+//                     this.agentEngine.setPlanFromResponse(JSON.stringify(checkpoint.planSnapshot));
+//                 }
+
+//                 vscode.window.showInformationMessage('Checkpoint restored successfully');
+
+//                 // 체크포인트 목록 새로고침
+//                 await this.getCheckpoints();
+//             }
+//         } catch (error) {
+//             vscode.window.showErrorMessage(`Failed to restore checkpoint: ${error}`);
+//         }
+//     }
+
+//     private async deleteCheckpoint(checkpointId: string): Promise<void> {
+//         if (!this.agentEngine) {
+//             return;
+//         }
+
+//         const checkpointManager = this.agentEngine.getCheckpointManager();
+//         if (!checkpointManager) {
+//             vscode.window.showErrorMessage('Checkpoint manager not available');
+//             return;
+//         }
+
+//         try {
+//             const confirmed = await vscode.window.showWarningMessage(
+//                 'Are you sure you want to delete this checkpoint?',
+//                 { modal: true },
+//                 'Yes',
+//                 'Cancel'
+//             );
+
+//             if (confirmed === 'Yes') {
+//                 await checkpointManager.deleteCheckpoint(checkpointId);
+//                 vscode.window.showInformationMessage('Checkpoint deleted');
+
+//                 // 체크포인트 목록 새로고침
+//                 await this.getCheckpoints();
+//             }
+//         } catch (error) {
+//             vscode.window.showErrorMessage(`Failed to delete checkpoint: ${error}`);
+//         }
 //     }
 
 //     private async previewFileOperation(index: number): Promise<void> {
@@ -952,7 +1741,9 @@
 //             if (operation.type === 'create') {
 //                 const emptyUri = vscode.Uri.parse('untitled:empty');
 //                 const proposedUri = vscode.Uri.parse(`tokamak-preview:${operation.path}`);
-//                 const proposedContent = operation.content || '';
+//                 let proposedContent = operation.content || '';
+//                 // 제어문자 제거 (diff 미리보기용)
+//                 proposedContent = removeControlCharacterArtifacts(proposedContent);
 
 //                 const provider = new (class implements vscode.TextDocumentContentProvider {
 //                     provideTextDocumentContent(): string { return proposedContent; }
@@ -962,28 +1753,135 @@
 //                 await vscode.commands.executeCommand('vscode.diff', emptyUri, proposedUri, `[CREATE] ${operation.path}`);
 //                 setTimeout(() => disposable.dispose(), 5000);
 
-//             } else if (operation.type === 'edit') {
+//             } else if (operation.type === 'prepend' || operation.type === 'append') {
+//                 try {
+//                     const existingData = await vscode.workspace.fs.readFile(fileUri);
+//                     const existingContent = Buffer.from(existingData).toString('utf8');
+//                     const text = removeControlCharacterArtifacts((operation.content || '').trim());
+//                     const proposedContent = operation.type === 'prepend'
+//                         ? text + '\n\n' + existingContent
+//                         : existingContent.trimEnd() + '\n\n' + text;
+//                     const normalize = (s: string) => s.replace(/\r\n|\r/g, '\n').trim();
+//                     if (normalize(existingContent) === normalize(proposedContent)) {
+//                         vscode.window.showInformationMessage(`[${operation.type}] ${operation.path}: 적용 예정 내용이 현재와 동일합니다.`);
+//                         return;
+//                     }
+//                     const provider = new (class implements vscode.TextDocumentContentProvider {
+//                         provideTextDocumentContent(): string { return proposedContent; }
+//                     })();
+//                     const disposable = vscode.workspace.registerTextDocumentContentProvider('tokamak-preview', provider);
+//                     const proposedUri = vscode.Uri.parse(`tokamak-preview:${operation.path}`);
+//                     await vscode.commands.executeCommand('vscode.diff', fileUri, proposedUri, `[${operation.type}] ${operation.path}`);
+//                     setTimeout(() => disposable.dispose(), 5000);
+//                 } catch (error) {
+//                     vscode.window.showErrorMessage(`Preview failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+//                 }
+//             } else if (operation.type === 'write_full') {
+//                 try {
+//                     const existingData = await vscode.workspace.fs.readFile(fileUri);
+//                     const existingContent = Buffer.from(existingData).toString('utf8');
+//                     let proposedContent = removeControlCharacterArtifacts(operation.content || '');
+//                     const normalize = (s: string) => s.replace(/\r\n|\r/g, '\n').trim();
+//                     if (normalize(existingContent) === normalize(proposedContent)) {
+//                         vscode.window.showInformationMessage(`[write_full] ${operation.path}: 적용 예정 내용이 현재 파일과 동일합니다.`);
+//                         return;
+//                     }
+//                     const provider = new (class implements vscode.TextDocumentContentProvider {
+//                         provideTextDocumentContent(): string { return proposedContent; }
+//                     })();
+//                     const disposable = vscode.workspace.registerTextDocumentContentProvider('tokamak-preview', provider);
+//                     const proposedUri = vscode.Uri.parse(`tokamak-preview:${operation.path}`);
+//                     await vscode.commands.executeCommand('vscode.diff', fileUri, proposedUri, `[write_full] ${operation.path}`);
+//                     setTimeout(() => disposable.dispose(), 5000);
+//                 } catch (error) {
+//                     vscode.window.showErrorMessage(`Preview failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+//                 }
+//             } else if (operation.type === 'edit' || operation.type === 'replace') {
 //                 try {
 //                     const existingData = await vscode.workspace.fs.readFile(fileUri);
 //                     const existingContent = Buffer.from(existingData).toString('utf8');
 //                     let proposedContent = operation.content || '';
 
-//                     if (proposedContent.includes('<<<<<<< SEARCH')) {
+//                     // 1. Explicit SEARCH and REPLACE parameters
+//                     if (operation.search && operation.replace !== undefined) {
+//                         let searchContent = removeControlCharacterArtifacts(operation.search);
+//                         let replaceContent = removeControlCharacterArtifacts(operation.replace);
+
+//                         if (searchContent !== replaceContent && existingContent.includes(searchContent)) {
+//                             proposedContent = existingContent.replace(searchContent, replaceContent);
+//                         } else if (!existingContent.includes(searchContent)) {
+//                             vscode.window.showErrorMessage(`[${operation.type}] ${operation.path}: 찾을 코드가 파일 내에 존재하지 않습니다. Diff를 표시할 수 없습니다.`);
+//                             return;
+//                         } else {
+//                             proposedContent = existingContent;
+//                         }
+//                     }
+//                     // 2. Legacy <<<<<<< SEARCH inside content
+//                     else if (proposedContent.includes('<<<<<<< SEARCH')) {
 //                         const blocks = proposedContent.split('>>>>>>> REPLACE');
 //                         let result = existingContent;
 //                         for (const block of blocks) {
 //                             if (!block.trim()) continue;
 //                             const searchParts = block.split('=======');
 //                             if (searchParts.length !== 2) continue;
-//                             const searchContent = searchParts[0].split('<<<<<<< SEARCH')[1]?.trim();
-//                             const replaceContent = searchParts[1]?.trim();
+//                             let searchContent = searchParts[0].split('<<<<<<< SEARCH')[1]?.trim();
+//                             let replaceContent = searchParts[1]?.trim();
+//                             // 제어문자 제거
+//                             if (searchContent) searchContent = removeControlCharacterArtifacts(searchContent);
+//                             if (replaceContent) replaceContent = removeControlCharacterArtifacts(replaceContent);
+
 //                             if (searchContent !== undefined && replaceContent !== undefined) {
+//                                 // SEARCH와 REPLACE가 동일하면 스킵 (불필요한 변경 방지)
+//                                 if (searchContent === replaceContent) {
+//                                     continue;
+//                                 }
+//                                 // 의심스러운 코드 삭제 감지
+//                                 const searchLines = searchContent.split('\n').length;
+//                                 const replaceLines = replaceContent.split('\n').length;
+//                                 const searchLength = searchContent.length;
+//                                 const replaceLength = replaceContent.length;
+
+//                                 if (replaceContent === '' ||
+//                                     (searchLines > 3 && replaceLines === 0) ||
+//                                     (searchLength > 100 && replaceLength < searchLength * 0.3)) {
+//                                     // 미리보기에서는 표시하되 실제 적용은 스킵됨
+//                                     continue;
+//                                 }
+
 //                                 if (result.includes(searchContent)) {
 //                                     result = result.replace(searchContent, replaceContent);
 //                                 }
 //                             }
 //                         }
 //                         proposedContent = result;
+//                     }
+//                     // 3. Just content, try fuzzy snippet fallback
+//                     else {
+//                         const fallbackContent = this.applySnippetFallback(existingContent, proposedContent);
+//                         if (fallbackContent !== null) {
+//                             proposedContent = fallbackContent;
+//                         } else {
+//                             // 너무 짧은 수정은 에러 처리하여 프리뷰에서도 막음
+//                             if (existingContent.length > 200 && proposedContent.length < existingContent.length * 0.5) {
+//                                 vscode.window.showErrorMessage(
+//                                     `[${operation.type}] ${operation.path}: AI가 잘못된 포맷으로 코드 수정(일부분)만 요청했습니다. 코드 매칭도 실패하여 차단합니다.`
+//                                 );
+//                                 return; // Diff 창을 띄우지 않음.
+//                             } else {
+//                                 // 기존과 완전히 대체 (write_full 처럼)
+//                                 // proposedContent는 이미 operation.content가 들어있음
+//                             }
+//                         }
+//                     }
+
+//                     // 최종적으로 제어문자 제거 (diff 미리보기용)
+//                     proposedContent = removeControlCharacterArtifacts(proposedContent);
+
+//                     // 변경 전/후가 동일하면 diff 창을 열지 않음 (Apply 전에 이미 적용됐거나 내용 동일 시)
+//                     const normalize = (s: string) => s.replace(/\r\n|\r/g, '\n').trim();
+//                     if (normalize(existingContent) === normalize(proposedContent)) {
+//                         vscode.window.showInformationMessage(`[EDIT] ${operation.path}: 적용 예정 내용이 현재 파일과 동일합니다. Diff를 건너뜁니다.`);
+//                         return;
 //                     }
 
 //                     const provider = new (class implements vscode.TextDocumentContentProvider {
@@ -1005,54 +1903,6 @@
 //         } catch (error) {
 //             vscode.window.showErrorMessage(`Could not preview: ${error instanceof Error ? error.message : 'Unknown error'}`);
 //         }
-//     }
-
-//     private async handleFileDrop(absolutePath: string): Promise<void> {
-//         // 절대 경로를 상대 경로로 변환
-//         let relativePath = vscode.workspace.asRelativePath(absolutePath);
-
-//         // 탐색기에서 드래그한 경우 절대 경로가 올 수 있으므로 한 번 더 체크
-//         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-//         if (workspaceFolder && absolutePath.startsWith(workspaceFolder.uri.fsPath)) {
-//             relativePath = path.relative(workspaceFolder.uri.fsPath, absolutePath);
-//         }
-
-//         // 파일 존재 여부 확인
-//         try {
-//             const uri = workspaceFolder ? vscode.Uri.joinPath(workspaceFolder.uri, relativePath) : vscode.Uri.file(absolutePath);
-//             const stat = await vscode.workspace.fs.stat(uri);
-//             await this.handleFileAttached(relativePath, stat.type === vscode.FileType.Directory);
-//         } catch (error) {
-//             console.error('[ChatPanel] File drop failed:', error);
-//             vscode.window.showErrorMessage(`Could not attach file: ${relativePath}`);
-//         }
-//     }
-
-//     private async handleFileAttached(filePath: string, isDir: boolean): Promise<void> {
-//         // 파일 첨부 시 즉시 채팅창에 세련된 칩 형태로 메시지 추가
-//         const fileContent = await this.getFileContent(filePath);
-
-//         // 채팅창에 시각적으로 남는 디자인 (마크다운 활용)
-//         const displayMessage = `
-// <div class="file-attachment-chip">
-//   <span class="icon">${isDir ? '📁' : '📄'}</span>
-//   <span class="name">Attached: **${filePath}**</span>
-// </div>
-
-// ${fileContent}
-// `;
-
-//         // AI 히스토리에 저장
-//         this.chatHistory.push({ role: 'user', content: `[Attached File: ${filePath}]\n${fileContent}` });
-
-//         // UI에 표시
-//         this.panel.webview.postMessage({
-//             command: 'addMessage',
-//             role: 'user',
-//             content: displayMessage
-//         });
-
-//         this.saveChatHistory();
 //     }
 
 //     private async handleUserMessage(text: string, attachedFiles: string[], attachedImages: string[] = []): Promise<void> {
@@ -1077,13 +1927,12 @@
 // **설정 방법:**
 // 1. \`Cmd + ,\` (Mac) / \`Ctrl + ,\` (Windows)로 설정 열기
 // 2. \`tokamak\` 검색
-// 3. \`API Key\`와 \`Base URL\` 입력
+// 3. \`API Key\` 입력 (Base URL은 \`https://api.ai.tokamak.network\`로 고정)
 
 // 또는 \`Cmd + Shift + P\` → "Preferences: Open Settings (JSON)"에서:
 // \`\`\`json
 // {
-//   "tokamak.apiKey": "your-api-key",
-//   "tokamak.baseUrl": "https://your-api.com/v1"
+//   "tokamak.apiKey": "your-api-key"
 // }
 // \`\`\``,
 //                 });
@@ -1129,25 +1978,24 @@
 //         this.chatHistory.push({ role: 'user', content: content });
 
 //         // 첨부된 파일 내용을 채팅창에 표시
-//         let displayText = text || ''; // 빈 문자열 처리
-
-//         console.log('[ChatPanel] Displaying message with attachedFiles:', attachedFiles.length);
-
+//         let displayText = text;
 //         if (attachedFiles.length > 0) {
+//             displayText += '\n\n';
 //             for (const filePath of attachedFiles) {
-//                 console.log('[ChatPanel] Getting content for:', filePath);
 //                 const fileContent = await this.getFileContent(filePath);
-//                 console.log('[ChatPanel] File content length:', fileContent.length);
-//                 // getFileContent가 이미 포맷팅된 내용을 반환함
-//                 displayText += fileContent;
+//                 // 파일 내용을 코드 블록으로 감싸서 표시
+//                 const language = this.getLanguageFromPath(filePath);
+//                 displayText += `\n\n**📎 ${filePath}**\n\`\`\`${language}\n${fileContent.replace(/^---.*?---\n/s, '').trim()}\n\`\`\`\n`;
 //             }
 //         }
 //         if (attachedImages.length > 0) {
-//             displayText += `\n\n🖼️ ${attachedImages.length} images attached (pasted)`;
+//             const currentModel = getSelectedModel();
+//             if (isVisionCapable(currentModel)) {
+//                 displayText += `\n\n🖼️ ${attachedImages.length}개 이미지 첨부됨`;
+//             } else {
+//                 displayText += `\n\n⚠️ ${attachedImages.length}개 이미지 첨부됨 — **${currentModel}** 모델은 vision을 지원하지 않습니다. 이미지는 전송되지 않습니다.`;
+//             }
 //         }
-
-//         console.log('[ChatPanel] Final displayText length:', displayText.length);
-//         console.log('[ChatPanel] Final displayText preview:', displayText.substring(0, 200));
 
 //         // Send user message to UI
 //         this.panel.webview.postMessage({ command: 'addMessage', role: 'user', content: displayText });
@@ -1161,6 +2009,29 @@
 //         const signal = abortController.signal;
 
 //         try {
+//             // [Agent 모드] AgentEngine의 Planning→Executing→Observing→Reflecting→Fixing 자율 루프 실행
+//             if (this.currentMode === 'agent' && this.agentEngine) {
+//                 this.agentEngine.reset();
+//                 this.agentEngine.updateContext({
+//                     userInput: processedText,
+//                     history: [...this.chatHistory],
+//                     abortSignal: signal,
+//                 });
+//                 await this.agentEngine.transitionTo('Planning');
+//                 await this.agentEngine.run();
+
+//                 const finalState = this.agentEngine.getState();
+//                 const summaryMsg = finalState === 'Done'
+//                     ? '✅ 모든 작업이 완료되었습니다.'
+//                     : '⚠️ 에이전트가 오류 상태로 종료되었습니다. 로그를 확인해주세요.';
+//                 this.panel.webview.postMessage({ command: 'addMessage', role: 'assistant', content: summaryMsg });
+//                 this.chatHistory.push({ role: 'assistant', content: summaryMsg });
+//                 this.saveChatHistory();
+//                 this.panel.webview.postMessage({ command: 'endStreaming' });
+//                 this.currentAbortController = null;
+//                 return;
+//             }
+
 //             let loopCount = 0;
 //             const maxLoops = 10;
 //             let needsMoreContext = true;
@@ -1174,10 +2045,12 @@
 //                 loopCount++;
 //                 let fullResponse = '';
 
-//                 for await (const chunk of streamChatCompletion(
+//                 const streamResult = streamChatCompletion(
 //                     [systemMessage, ...this.chatHistory],
 //                     signal
-//                 )) {
+//                 );
+
+//                 for await (const chunk of streamResult.content) {
 //                     if (signal.aborted) {
 //                         break;
 //                     }
@@ -1185,20 +2058,34 @@
 //                     this.panel.webview.postMessage({ command: 'streamChunk', content: chunk });
 //                 }
 
+//                 // Get token usage after streaming completes
+//                 const usage = await streamResult.usage;
+//                 if (usage) {
+//                     this.panel.webview.postMessage({
+//                         command: 'updateTokenUsage',
+//                         usage: {
+//                             prompt: usage.promptTokens,
+//                             completion: usage.completionTokens,
+//                             total: usage.totalTokens,
+//                         },
+//                     });
+//                 }
+
 //                 if (signal.aborted) break;
 
 //                 this.chatHistory.push({ role: 'assistant', content: fullResponse });
 //                 needsMoreContext = false;
 
-//                 // [Phase 1 통합] Plan 모드인 경우 AgentEngine에 전달
+//                 // [Plan 모드] AI 응답을 파싱하여 사이드바에 계획을 표시 (실행하지 않음)
 //                 if (this.currentMode === 'plan' && this.agentEngine) {
-//                     await this.agentEngine.setPlanFromResponse(fullResponse);
-//                     // 자율 루프 시작 (현재는 플래닝 단계까지만 시뮬레이션)
-//                     await this.agentEngine.run();
+//                     this.agentEngine.setPlanForDisplay(fullResponse);
 //                 }
 
 //                 // In agent or ask mode, parse file operations
 //                 const operations = this.parseFileOperations(fullResponse);
+
+//                 // Agent 모드도 Ask와 동일: 파일 작업은 사용자가 "Apply Changes"를 누를 때만 적용.
+//                 // (이전에는 Agent에서 응답 직후 자동 실행해 Apply 전에 이미 변경된 것처럼 보이는 문제가 있어 제거함)
 
 //                 // Handle READ operations automatically
 //                 const readOps = operations.filter(op => op.type === 'read');
@@ -1258,7 +2145,7 @@
 //                     this.panel.webview.postMessage({
 //                         command: 'addMessage',
 //                         role: 'assistant',
-//                         content: '🔗 **API 엔드포인트 오류**\n\nAPI URL을 찾을 수 없습니다.\n\n`tokamak.baseUrl` 설정을 확인해주세요.',
+//                         content: '🔗 **API 엔드포인트 오류**\n\nAPI에 연결할 수 없습니다. 네트워크 연결을 확인해주세요.',
 //                     });
 //                 } else if (error.message.includes('500') || error.message.includes('Internal')) {
 //                     this.panel.webview.postMessage({
@@ -1270,7 +2157,7 @@
 //                     this.panel.webview.postMessage({
 //                         command: 'addMessage',
 //                         role: 'assistant',
-//                         content: '🌐 **네트워크 연결 오류**\n\nAI 서버에 연결할 수 없습니다.\n\n- 인터넷 연결을 확인해주세요\n- `tokamak.baseUrl`이 올바른지 확인해주세요\n- VPN이 필요한 경우 연결되어 있는지 확인해주세요',
+//                         content: '🌐 **네트워크 연결 오류**\n\nAI 서버에 연결할 수 없습니다.\n\n- 인터넷 연결을 확인해주세요\n- VPN이 필요한 경우 연결되어 있는지 확인해주세요',
 //                     });
 //                 } else {
 //                     this.panel.webview.postMessage({
@@ -1310,56 +2197,114 @@
 //             return;
 //         }
 
+//         // 여러 줄 명령어를 개별 명령어로 분리
+//         const commands = command
+//             .split('\n')
+//             .map(line => line.trim())
+//             .filter(line => line.length > 0 && !line.startsWith('#')); // 빈 줄과 주석 제거
+
+//         if (commands.length === 0) {
+//             vscode.window.showWarningMessage('No valid commands found');
+//             return;
+//         }
+
 //         // Show terminal for user visibility
 //         let terminal = vscode.window.terminals.find(t => t.name === 'Tokamak');
 //         if (!terminal) {
 //             terminal = vscode.window.createTerminal('Tokamak');
 //         }
 //         terminal.show();
-//         terminal.sendText(command);
 
-//         // Execute and capture output
-//         vscode.window.showInformationMessage(`Running: ${command}`);
+//         // 각 명령어를 순차적으로 실행
+//         let allOutput = '';
+//         let currentCwd = workspaceFolder.uri.fsPath; // 현재 작업 디렉토리 추적
 
 //         try {
-//             const { exec } = require('child_process');
-//             const cwd = workspaceFolder.uri.fsPath;
+//             for (let i = 0; i < commands.length; i++) {
+//                 const cmd = commands[i];
 
-//             const result = await new Promise<string>((resolve) => {
-//                 exec(command, { cwd, timeout: 30000, maxBuffer: 1024 * 1024 }, (error: any, stdout: string, stderr: string) => {
-//                     let output = '';
-
-//                     if (stdout) {
-//                         output += `[STDOUT]\n${stdout}\n`;
+//                 // cd 명령어 처리 (단, && || ; 같은 연산자가 포함된 경우는 그대로 실행)
+//                 // && || ; 가 포함된 명령어는 cd로 인식하지 않고 그대로 실행
+//                 if (!cmd.includes('&&') && !cmd.includes('||') && !cmd.includes(';')) {
+//                     // cd 명령어가 정확히 "cd 경로" 형태일 때만 처리
+//                     const cdMatch = cmd.match(/^cd\s+([^\s&|;]+)$/);
+//                     if (cdMatch) {
+//                         const targetDir = cdMatch[1].trim();
+//                         // 상대 경로인 경우 현재 cwd 기준으로 해석
+//                         const newCwd = require('path').isAbsolute(targetDir)
+//                             ? targetDir
+//                             : require('path').join(currentCwd, targetDir);
+//                         currentCwd = newCwd;
+//                         // 터미널에만 cd 명령어 전송 (exec는 cwd 옵션으로 처리)
+//                         terminal.sendText(cmd);
+//                         allOutput += `\n--- Command ${i + 1}/${commands.length}: ${cmd} ---\n(Changed directory to: ${currentCwd})\n`;
+//                         continue;
 //                     }
+//                 }
 
-//                     if (stderr) {
-//                         output += `[STDERR]\n${stderr}\n`;
+//                 // 터미널에 명령어 표시 및 실행
+//                 terminal.sendText(cmd);
+
+//                 // Execute and capture output
+//                 vscode.window.showInformationMessage(`Running (${i + 1}/${commands.length}): ${cmd}`);
+
+//                 try {
+//                     const { exec } = require('child_process');
+
+//                     // && || ; 같은 연산자가 포함된 명령어는 셸을 통해 실행
+//                     // cd 명령어도 셸 내부 명령어이므로 셸을 통해 실행해야 함
+//                     const shellCmd = process.platform === 'win32'
+//                         ? `cmd /c "${cmd}"`
+//                         : `/bin/bash -c "${cmd.replace(/"/g, '\\"')}"`;
+
+//                     const result = await new Promise<string>((resolve) => {
+//                         exec(shellCmd, { cwd: currentCwd, timeout: 30000, maxBuffer: 1024 * 1024 }, (error: any, stdout: string, stderr: string) => {
+//                             let output = '';
+
+//                             if (stdout) {
+//                                 output += `[STDOUT]\n${stdout}\n`;
+//                             }
+
+//                             if (stderr) {
+//                                 output += `[STDERR]\n${stderr}\n`;
+//                             }
+
+//                             if (error) {
+//                                 output += `[ERROR] Exit code: ${error.code}\n${error.message}\n`;
+//                             }
+
+//                             if (!output) {
+//                                 output = '(Command executed with no output)';
+//                             }
+
+//                             resolve(output);
+//                         });
+//                     });
+
+//                     allOutput += `\n--- Command ${i + 1}/${commands.length}: ${cmd} ---\n${result}\n`;
+
+//                     // 에러가 발생하면 중단 (선택적 - 필요시 계속 진행하도록 변경 가능)
+//                     if (result.includes('[ERROR]')) {
+//                         break;
 //                     }
+//                 } catch (error) {
+//                     const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+//                     allOutput += `\n--- Command ${i + 1}/${commands.length}: ${cmd} ---\n[ERROR] ${errorMsg}\n`;
+//                     break;
+//                 }
+//             }
 
-//                     if (error) {
-//                         output += `[ERROR] Exit code: ${error.code}\n${error.message}\n`;
-//                     }
-
-//                     if (!output) {
-//                         output = '(Command executed with no output)';
-//                     }
-
-//                     resolve(output);
-//                 });
-//             });
-
-//             // Send result to AI automatically
+//             // 모든 명령어 실행 결과를 한 번에 표시
 //             this.panel.webview.postMessage({
 //                 command: 'addMessage',
 //                 role: 'assistant',
-//                 content: `**Command executed:** \`${command}\`\n\n**Result:**\n\`\`\`\n${result}\n\`\`\``,
+//                 content: `**Commands executed:**\n\`\`\`\n${commands.join('\n')}\n\`\`\`\n\n**Results:**\n\`\`\`\n${allOutput.trim()}\n\`\`\``,
 //             });
 
 //             // Add to history
 //             this.chatHistory.push({
 //                 role: 'assistant',
-//                 content: `Command: ${command}\nResult:\n${result}`,
+//                 content: `Commands: ${commands.join('; ')}\nResults:\n${allOutput.trim()}`,
 //             });
 
 //             this.saveChatHistory();
@@ -1621,29 +2566,6 @@
 //             font-family: var(--vscode-editor-font-family);
 //             font-size: var(--vscode-editor-font-size);
 //         }
-        
-//         /* File Attachment Chip */
-//         .file-attachment-chip {
-//             display: inline-flex;
-//             align-items: center;
-//             gap: 8px;
-//             padding: 6px 12px;
-//             background: var(--vscode-badge-background);
-//             color: var(--vscode-badge-foreground);
-//             border-radius: 20px;
-//             font-size: 0.9em;
-//             margin: 8px 0;
-//             border: 1px solid var(--vscode-widget-border);
-//         }
-//         .file-attachment-chip .icon {
-//             font-size: 1.1em;
-//         }
-//         /* Drag and Drop Feedback */
-//         body.dragging {
-//             background-color: var(--vscode-list-hoverBackground);
-//             outline: 2px dashed var(--vscode-focusBorder);
-//             outline-offset: -4px;
-//         }
 //         .code-header {
 //             display: flex;
 //             justify-content: space-between;
@@ -1679,6 +2601,28 @@
 //         .run-btn:hover {
 //             opacity: 0.9;
 //         }
+//         #token-usage-bar {
+//             padding: 6px 15px;
+//             background-color: var(--vscode-editorWidget-background);
+//             border-top: 1px solid var(--vscode-widget-border);
+//             display: flex;
+//             align-items: center;
+//             gap: 8px;
+//             font-size: 0.85em;
+//             color: var(--vscode-descriptionForeground);
+//         }
+//         .token-label {
+//             font-weight: 600;
+//             color: var(--vscode-foreground);
+//         }
+//         #token-display {
+//             font-weight: bold;
+//             color: var(--vscode-charts-blue);
+//         }
+//         .token-detail {
+//             opacity: 0.7;
+//             font-size: 0.9em;
+//         }
 //         #input-container {
 //             padding: 15px;
 //             border-top: 1px solid var(--vscode-widget-border);
@@ -1689,10 +2633,7 @@
 //             display: flex;
 //             flex-wrap: wrap;
 //             gap: 6px;
-//             margin-bottom: 8px;
-//             padding: 8px;
-//             background: var(--vscode-input-background);
-//             border-radius: 4px;
+//             margin-bottom: 10px;
 //         }
 //         #attached-files:empty {
 //             display: none;
@@ -1927,6 +2868,22 @@
 //             background-color: var(--vscode-editorWarning-foreground);
 //             color: black;
 //         }
+//         .operation-item .op-type.write_full {
+//             background-color: var(--vscode-editorWarning-foreground);
+//             color: black;
+//         }
+//         .operation-item .op-type.replace {
+//             background-color: var(--vscode-charts-blue);
+//             color: white;
+//         }
+//         .operation-item .op-type.prepend {
+//             background-color: var(--vscode-charts-green);
+//             color: white;
+//         }
+//         .operation-item .op-type.append {
+//             background-color: var(--vscode-charts-green);
+//             color: white;
+//         }
 //         .operation-item .op-type.delete {
 //             background-color: var(--vscode-errorForeground);
 //             color: white;
@@ -2005,6 +2962,27 @@
 //             justify-content: space-between;
 //             align-items: center;
 //         }
+//         #history-search {
+//             padding: 8px 12px;
+//             border-bottom: 1px solid var(--vscode-widget-border);
+//             background-color: var(--vscode-input-background);
+//         }
+//         #history-search-input {
+//             width: 100%;
+//             padding: 6px 10px;
+//             border: 1px solid var(--vscode-input-border);
+//             background-color: var(--vscode-input-background);
+//             color: var(--vscode-input-foreground);
+//             border-radius: 4px;
+//             font-family: inherit;
+//             font-size: 0.85em;
+//         }
+//         #history-search-input:focus {
+//             outline: 1px solid var(--vscode-focusBorder);
+//         }
+//         #history-search-input::placeholder {
+//             color: var(--vscode-input-placeholderForeground);
+//         }
 //         #history-list {
 //             flex: 1;
 //             overflow-y: auto;
@@ -2038,22 +3016,56 @@
 //         .session-date {
 //             font-size: 0.75em;
 //             opacity: 0.6;
+//             margin-bottom: 4px;
 //         }
-//         .delete-session {
+//         .session-mode {
+//             display: inline-block;
+//             padding: 2px 6px;
+//             border-radius: 3px;
+//             font-size: 0.7em;
+//             font-weight: 600;
+//             margin-top: 4px;
+//         }
+//         .session-mode.ask {
+//             background-color: var(--vscode-charts-blue);
+//             color: white;
+//         }
+//         .session-mode.plan {
+//             background-color: var(--vscode-charts-yellow);
+//             color: black;
+//         }
+//         .session-mode.agent {
+//             background-color: var(--vscode-charts-green);
+//             color: white;
+//         }
+//         .session-actions {
 //             position: absolute;
 //             right: 10px;
 //             top: 50%;
 //             transform: translateY(-50%);
+//             display: flex;
+//             gap: 4px;
 //             opacity: 0;
+//             transition: opacity 0.2s;
+//         }
+//         .session-item:hover .session-actions {
+//             opacity: 1;
+//         }
+//         .delete-session, .export-session {
 //             cursor: pointer;
 //             padding: 4px;
+//             font-size: 0.9em;
+//             opacity: 0.7;
+//             transition: opacity 0.2s;
 //         }
-//         .session-item:hover .delete-session {
-//             opacity: 0.6;
-//         }
-//         .session-item .delete-session:hover {
+//         .delete-session:hover, .export-session:hover {
 //             opacity: 1;
+//         }
+//         .delete-session:hover {
 //             color: var(--vscode-errorForeground);
+//         }
+//         .export-session:hover {
+//             color: var(--vscode-textLink-foreground);
 //         }
 //         #history-overlay {
 //             display: none;
@@ -2146,6 +3158,84 @@
 //         .step-desc {
 //             flex: 1;
 //         }
+
+//         /* Checkpoint Panel Styles */
+//         #checkpoints-panel {
+//             display: none;
+//             padding: 12px 15px;
+//             background-color: var(--vscode-sideBar-background);
+//             border-top: 1px solid var(--vscode-widget-border);
+//             max-height: 300px;
+//             overflow-y: auto;
+//         }
+//         #checkpoints-panel.visible {
+//             display: block;
+//         }
+//         .checkpoints-header {
+//             display: flex;
+//             justify-content: space-between;
+//             align-items: center;
+//             margin-bottom: 8px;
+//         }
+//         .checkpoints-header h4 {
+//             margin: 0;
+//             font-size: 0.9em;
+//         }
+//         .checkpoint-item {
+//             display: flex;
+//             align-items: center;
+//             gap: 8px;
+//             padding: 8px 10px;
+//             background-color: var(--vscode-editor-background);
+//             border-radius: 4px;
+//             margin-bottom: 6px;
+//             font-size: 0.85em;
+//             cursor: pointer;
+//             transition: background-color 0.2s;
+//         }
+//         .checkpoint-item:hover {
+//             background-color: var(--vscode-list-hoverBackground);
+//         }
+//         .checkpoint-info {
+//             flex: 1;
+//             min-width: 0;
+//         }
+//         .checkpoint-description {
+//             font-weight: 500;
+//             white-space: nowrap;
+//             overflow: hidden;
+//             text-overflow: ellipsis;
+//             margin-bottom: 2px;
+//         }
+//         .checkpoint-meta {
+//             font-size: 0.75em;
+//             opacity: 0.6;
+//         }
+//         .checkpoint-actions {
+//             display: flex;
+//             gap: 4px;
+//         }
+//         .checkpoint-btn {
+//             padding: 4px 8px;
+//             border: 1px solid var(--vscode-widget-border);
+//             background-color: transparent;
+//             color: var(--vscode-foreground);
+//             border-radius: 3px;
+//             cursor: pointer;
+//             font-size: 0.75em;
+//         }
+//         .checkpoint-btn:hover {
+//             background-color: var(--vscode-toolbar-hoverBackground);
+//         }
+//         .checkpoint-btn.compare {
+//             color: var(--vscode-textLink-foreground);
+//         }
+//         .checkpoint-btn.restore {
+//             color: var(--vscode-testing-iconPassed);
+//         }
+//         .checkpoint-btn.delete {
+//             color: var(--vscode-errorForeground);
+//         }
 //     </style>
 // </head>
 // <body>
@@ -2154,6 +3244,9 @@
 //         <div id="history-header">
 //             <h4>Chat History</h4>
 //             <button id="close-history" style="background:none; border:none; color:inherit; cursor:pointer; font-size:1.4em;">×</button>
+//         </div>
+//         <div id="history-search">
+//             <input type="text" id="history-search-input" placeholder="Search conversations...">
 //         </div>
 //         <div id="history-list"></div>
 //     </div>
@@ -2183,6 +3276,13 @@
 //         </div>
 //         <div id="plan-list"></div>
 //     </div>
+//     <div id="checkpoints-panel">
+//         <div class="checkpoints-header">
+//             <h4>💾 Checkpoints</h4>
+//             <button id="refresh-checkpoints" class="checkpoint-btn" title="Refresh checkpoints">🔄</button>
+//         </div>
+//         <div id="checkpoints-list"></div>
+//     </div>
 //     <div id="operations-panel">
 //         <h4>⚡ Pending File Operations</h4>
 //         <div id="operations-list"></div>
@@ -2190,6 +3290,11 @@
 //             <button id="apply-btn">✓ Apply Changes</button>
 //             <button id="reject-btn">✗ Reject</button>
 //         </div>
+//     </div>
+//     <div id="token-usage-bar">
+//         <span class="token-label">Tokens:</span>
+//         <span id="token-display">0</span>
+//         <span class="token-detail" id="token-detail">(Prompt: 0 | Completion: 0)</span>
 //     </div>
 //     <div id="input-container">
 //         <div id="autocomplete"></div>
@@ -2235,9 +3340,15 @@
 //             const historyList = document.getElementById('history-list');
 //             const historyOverlay = document.getElementById('history-overlay');
 //             const closeHistoryBtn = document.getElementById('close-history');
+//             const historySearchInput = document.getElementById('history-search-input');
 //             const planPanel = document.getElementById('plan-panel');
 //             const planList = document.getElementById('plan-list');
 //             const agentStatusBadge = document.getElementById('agent-status');
+//             const tokenDisplay = document.getElementById('token-display');
+//             const tokenDetail = document.getElementById('token-detail');
+//             const checkpointsPanel = document.getElementById('checkpoints-panel');
+//             const checkpointsList = document.getElementById('checkpoints-list');
+//             const refreshCheckpointsBtn = document.getElementById('refresh-checkpoints');
 
 //             let currentStreamingMessage = null;
 //             let streamingContent = '';
@@ -2250,6 +3361,9 @@
 //             let mentionStartIndex = -1;
 //             let slashStartIndex = -1;
 //             let currentMode = 'ask';
+//             let sessionTotalTokens = 0;
+//             let sessionPromptTokens = 0;
+//             let sessionCompletionTokens = 0;
 //             let attachedImages = []; // Array of base64 strings
 
 //             function addImageTag(base64Data) {
@@ -2298,11 +3412,19 @@
 //             const langLabel = lang || 'code';
 //             const isShell = ['bash', 'shell', 'sh', 'zsh', 'powershell', 'cmd', 'python', 'python3'].includes(lang.toLowerCase());
 //             const runBtn = isShell ?\`<button class="run-btn" onclick="runCommand(this)">▶ Run</button>\` : '';
-//             return \`<div class="code-header"><span>\${langLabel}</span><div><button class="insert-btn" onclick="insertCode(this)">Insert</button>\${runBtn}</div></div><pre><code class="language-\${lang}">\${escapedCode}</code></pre>\`;
+//             // Insert 버튼 제거: Agent 모드에서는 FILE_OPERATION으로 처리되고, 일반 채팅에서도 불필요
+//             return \`<div class="code-header"><span>\${langLabel}</span><div>\${runBtn}</div></div><pre><code class="language-\${lang}">\${escapedCode}</code></pre>\`;
 //             });
 //             result = result.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
 //             result = result.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+//             // <pre>...</pre> 블록 내부의 \\n은 보존하고, 그 외 텍스트에만 <br> 적용
+//             const codeBlockPlaceholders = [];
+//             result = result.replace(/<pre[\\s\\S]*?<\\/pre>/g, m => {
+//                 codeBlockPlaceholders.push(m);
+//                 return \`\\x00PRE\${codeBlockPlaceholders.length - 1}\\x00\`;
+//             });
 //             result = result.replace(/\\n/g, '<br>');
+//             result = result.replace(/\\x00PRE(\\d+)\\x00/g, (_, i) => codeBlockPlaceholders[Number(i)]);
 //             return result;
 //             }
 
@@ -2426,15 +3548,12 @@
 //             stopBtn.classList.remove('visible');
 //             }
 
-//             function insertCode(btn) {
-//             const pre = btn.closest('.code-header').nextElementSibling;
-//             const code = pre.querySelector('code').textContent;
-//             vscode.postMessage({ command: 'insertCode', code: code });
-//             }
+//             // insertCode 함수 제거됨 - Insert 버튼이 더 이상 표시되지 않음
 
 //             function runCommand(btn) {
 //             const pre = btn.closest('.code-header').nextElementSibling;
-//             const command = pre.querySelector('code').textContent;
+//             // innerText: <br> 태그를 \n 줄바꿈으로 인식 (textContent는 <br>을 무시해서 줄이 붙음)
+//             const command = pre.querySelector('code').innerText;
 //             vscode.postMessage({ command: 'runCommand', commandText: command });
 //             }
 
@@ -2446,27 +3565,22 @@
 
 //             const tag = document.createElement('span');
 //             tag.className = 'file-tag';
-//             tag.innerHTML = '<span class="icon">' + (isDir ? '📁' : '📄') + '</span>' +
-//                 '<span class="file-name" data-path="' + filePath + '">' + fileName + '</span>' +
-//                 '<span class="remove-btn" data-path="' + filePath + '">×</span>';
+//             tag.innerHTML = \`
+//             <span class="icon">\${isDir ? '📁' : '📄'}</span>
+//             <span class="file-name" data-path="\${filePath}">\${fileName}</span>
+//             <span class="remove-btn" data-path="\${filePath}">×</span>
+//             \`;
 
 //             tag.querySelector('.file-name').addEventListener('click', () => {
 //             vscode.postMessage({ command: 'openFile', path: filePath });
 //             });
 
 //             tag.querySelector('.remove-btn').addEventListener('click', () => {
-//                 attachedFiles = attachedFiles.filter(f => f.path !== filePath);
-//                 tag.remove();
+//             attachedFiles = attachedFiles.filter(f => f.path !== filePath);
+//             tag.remove();
 //             });
 
 //             attachedFilesContainer.appendChild(tag);
-            
-//             // 파일 첨부 시 즉시 채팅창에 메시지 추가
-//             vscode.postMessage({ 
-//                 command: 'fileAttached', 
-//                 filePath: filePath,
-//                 isDir: isDir
-//             });
 //             }
 
 //             function showAutocomplete(files) {
@@ -2479,15 +3593,13 @@
 //             return;
 //             }
 
-//             autocomplete.innerHTML = files.map((file, index) => {
-//                 const activeClass = index === 0 ? 'selected' : '';
-//                 const icon = file.isDir ? '📁' : '📄';
-//                 return '<div class="autocomplete-item ' + activeClass + '" data-index="' + index + '" data-path="' + file.path + '" data-isdir="' + file.isDir + '">' +
-//                     '<span class="icon">' + icon + '</span>' +
-//                     '<span class="name">' + file.name + '</span>' +
-//                     '<span class="path">' + file.path + '</span>' +
-//                     '</div>';
-//             }).join('');
+//             autocomplete.innerHTML = files.map((file, index) => \`
+//             <div class="autocomplete-item \${index === 0 ? 'selected' : ''}" data-index="\${index}" data-path="\${file.path}" data-isdir="\${file.isDir}">
+//             <span class="icon">\${file.isDir ? '📁' : '📄'}</span>
+//             <span class="name">\${file.name}</span>
+//             <span class="path">\${file.path}</span>
+//             </div>
+//             \`).join('');
 
 //             autocomplete.querySelectorAll('.autocomplete-item').forEach(item => {
 //             item.addEventListener('click', () => {
@@ -2508,14 +3620,13 @@
 //             return;
 //             }
 
-//             autocomplete.innerHTML = commands.map((cmd, index) => {
-//                 const activeClass = index === 0 ? 'selected' : '';
-//                 return '<div class="autocomplete-item slash-cmd ' + activeClass + '" data-index="' + index + '" data-name="' + cmd.name + '">' +
-//                     '<span class="icon">⚡</span>' +
-//                     '<span class="name">' + cmd.name + '</span>' +
-//                     '<span class="desc">' + cmd.description + '</span>' +
-//                     '</div>';
-//             }).join('');
+//             autocomplete.innerHTML = commands.map((cmd, index) => \`
+//             <div class="autocomplete-item slash-cmd \${index === 0 ? 'selected' : ''}" data-index="\${index}" data-name="\${cmd.name}">
+//             <span class="icon">⚡</span>
+//             <span class="name">\${cmd.name}</span>
+//             <span class="desc">\${cmd.description}</span>
+//             </div>
+//             \`).join('');
 
 //             autocomplete.querySelectorAll('.autocomplete-item').forEach(item => {
 //             item.addEventListener('click', () => {
@@ -2569,6 +3680,8 @@
 //             }
 
 //             let isSending = false;
+//             let isComposing = false; // IME 입력 중인지 추적
+            
 //             function sendMessage() {
 //             if (isSending) return;
 
@@ -2585,7 +3698,13 @@
 //             attachedImages: attachedImages
 //             });
 
+//             // 입력 필드를 비우고 IME 상태 리셋
 //             messageInput.value = '';
+//             messageInput.blur(); // IME 상태 리셋
+//             setTimeout(() => {
+//                 messageInput.focus(); // 다시 포커스
+//             }, 10);
+            
 //             messageInput.style.height = 'auto';
 //             attachedFiles = [];
 //             attachedImages = [];
@@ -2656,64 +3775,78 @@
 //             const closeHistory = () => {
 //             historyPanel.classList.remove('visible');
 //             historyOverlay.classList.remove('visible');
+//             if (historySearchInput) {
+//             historySearchInput.value = '';
+//             }
 //             };
 
 //             closeHistoryBtn.addEventListener('click', closeHistory);
 //             historyOverlay.addEventListener('click', closeHistory);
 
-//             // Drag and Drop support
-//             window.addEventListener('dragover', (e) => {
-//                 e.preventDefault();
-//                 e.stopPropagation();
-//                 document.body.classList.add('dragging');
+//             if (historySearchInput) {
+//             historySearchInput.addEventListener('input', () => {
+//             filterSessions();
 //             });
+//             }
 
-//             window.addEventListener('dragleave', () => {
-//                 document.body.classList.remove('dragging');
-//             });
-
-//             window.addEventListener('drop', (e) => {
-//                 e.preventDefault();
-//                 e.stopPropagation();
-//                 document.body.classList.remove('dragging');
-                
-//                 // VS Code Explorer에서 드롭된 파일 처리
-//                 // VS Code는 드롭된 파일의 URI를 텍스트로 제공할 수 있음
-//                 const data = e.dataTransfer.getData('text/plain');
-//                 if (data && (data.startsWith('file://') || data.includes('/'))) {
-//                     const paths = data.split('\n').filter(p => p.trim());
-//                     paths.forEach(p => {
-//                         // URI 형식(file://...)일 경우 경로만 추출
-//                         let cleanPath = p.trim();
-//                         if (cleanPath.startsWith('file://')) {
-//                             cleanPath = decodeURIComponent(cleanPath.substring(7));
-//                         }
-//                         // 백엔드에 파일 첨부 요청
-//                         vscode.postMessage({ command: 'dropFile', path: cleanPath });
-//                     });
-//                 }
-//             });
+//             let allSessions = [];
+//             let currentSessionId = null;
 
 //             function renderSessions(sessions, currentId) {
-//             historyList.innerHTML = sessions.map(s => {
+//             allSessions = sessions;
+//             currentSessionId = currentId;
+//             filterSessions();
+//             }
+
+//             function filterSessions() {
+//             const searchInput = document.getElementById('history-search-input');
+//             const query = searchInput ? searchInput.value.toLowerCase().trim() : '';
+            
+//             const filtered = query ? allSessions.filter(s => {
+//             const title = (s.title || 'New Conversation').toLowerCase();
+//             const date = new Date(s.timestamp).toLocaleString().toLowerCase();
+//             return title.includes(query) || date.includes(query);
+//             }) : allSessions;
+
+//             historyList.innerHTML = filtered.map(s => {
 //             const date = new Date(s.timestamp).toLocaleString();
-//             const activeClass = s.id === currentId ? 'active' : '';
+//             const activeClass = s.id === currentSessionId ? 'active' : '';
 //             const title = s.title || 'New Conversation';
+//             const mode = s.mode || 'ask';
+//             const modeLabel = mode === 'ask' ? 'ASK' : mode === 'plan' ? 'PLAN' : 'AGENT';
 //             return '<div class="session-item ' + activeClass + '" data-id="' + s.id + '">' +
-//             '<div class="session-title">' + title + '</div>' +
-//             '<div class="session-date">' + date + '</div>' +
-//             '<span class="delete-session" data-id="' + s.id + '">🗑️</span>' +
+//             '<div class="session-title">' + escapeHtml(title) + '</div>' +
+//             '<div class="session-date">' + escapeHtml(date) + '</div>' +
+//             '<span class="session-mode ' + mode + '">' + modeLabel + '</span>' +
+//             '<div class="session-actions">' +
+//             '<span class="export-session" data-id="' + s.id + '" title="Export conversation">📥</span>' +
+//             '<span class="delete-session" data-id="' + s.id + '" title="Delete conversation">🗑️</span>' +
+//             '</div>' +
 //             '</div>';
 //             }).join('');
 
 //             historyList.querySelectorAll('.session-item').forEach(item => {
 //             item.addEventListener('click', (e) => {
-//             if (e.target.classList.contains('delete-session')) {
-//             vscode.postMessage({ command: 'deleteSession', sessionId: e.target.dataset.id });
+//             if (e.target.classList.contains('delete-session') || e.target.classList.contains('export-session')) {
+//             return; // Handled by separate click handlers
 //             } else {
 //             vscode.postMessage({ command: 'loadSession', sessionId: item.dataset.id });
 //             closeHistory();
 //             }
+//             });
+//             });
+
+//             historyList.querySelectorAll('.delete-session').forEach(btn => {
+//             btn.addEventListener('click', (e) => {
+//             e.stopPropagation();
+//             vscode.postMessage({ command: 'deleteSession', sessionId: btn.dataset.id });
+//             });
+//             });
+
+//             historyList.querySelectorAll('.export-session').forEach(btn => {
+//             btn.addEventListener('click', (e) => {
+//             e.stopPropagation();
+//             vscode.postMessage({ command: 'exportSession', sessionId: btn.dataset.id });
 //             });
 //             });
 //             }
@@ -2727,6 +3860,9 @@
 //             modeDescription.textContent = modeDescriptions[currentMode];
 //             messageInput.placeholder = modePlaceholders[currentMode];
 //             vscode.postMessage({ command: 'selectMode', mode: currentMode });
+            
+//             // Agent 모드이고 checkpoint 기능이 활성화된 경우에만 체크포인트 로드 및 패널 표시
+//             // (설정은 서버에서 확인되므로 여기서는 일단 표시하지 않음, modeChanged 이벤트에서 처리됨)
 //             });
 //             });
 
@@ -2752,6 +3888,15 @@
 //             vscode.postMessage({ command: 'newChat' });
 //             });
 
+//             // IME 입력 시작/종료 추적
+//             messageInput.addEventListener('compositionstart', () => {
+//             isComposing = true;
+//             });
+            
+//             messageInput.addEventListener('compositionend', () => {
+//             isComposing = false;
+//             });
+            
 //             messageInput.addEventListener('keydown', (e) => {
 //             if (autocomplete.classList.contains('visible')) {
 //             if (e.key === 'ArrowDown') {
@@ -2776,7 +3921,8 @@
 //             }
 //             }
 
-//             if (e.key === 'Enter' && !e.shiftKey) {
+//             // IME 입력 중이 아닐 때만 메시지 전송
+//             if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
 //             e.preventDefault();
 //             sendMessage();
 //             }
@@ -2846,6 +3992,19 @@
 //             case 'clearMessages':
 //             chatContainer.innerHTML = '';
 //             hideOperations();
+//             // Reset token counters
+//             sessionTotalTokens = 0;
+//             sessionPromptTokens = 0;
+//             sessionCompletionTokens = 0;
+//             tokenDisplay.textContent = '0';
+//             tokenDetail.textContent = '(Prompt: 0 | Completion: 0)';
+//             break;
+//             case 'updateTokenUsage':
+//             sessionPromptTokens += message.usage.prompt;
+//             sessionCompletionTokens += message.usage.completion;
+//             sessionTotalTokens += message.usage.total;
+//             tokenDisplay.textContent = sessionTotalTokens.toLocaleString();
+//             tokenDetail.textContent = \`(Prompt: \${sessionPromptTokens.toLocaleString()} | Completion: \${sessionCompletionTokens.toLocaleString()})\`;
 //             break;
 //             case 'updateModels':
 //             updateModels(message.models, message.selected);
@@ -2860,6 +4019,15 @@
 //             });
 //             modeDescription.textContent = modeDescriptions[currentMode];
 //             messageInput.placeholder = modePlaceholders[currentMode];
+            
+//             // Agent 모드이고 checkpoint 기능이 활성화된 경우에만 체크포인트 패널 표시 및 로드
+//             const checkpointsEnabled = message.checkpointsEnabled !== undefined ? message.checkpointsEnabled : false;
+//             if (currentMode === 'agent' && checkpointsEnabled) {
+//             checkpointsPanel.classList.add('visible');
+//             vscode.postMessage({ command: 'getCheckpoints' });
+//             } else {
+//             checkpointsPanel.classList.remove('visible');
+//             }
 //             break;
 //             case 'showOperations':
 //             showOperations(message.operations);
@@ -2893,6 +4061,13 @@
 //             case 'agentStateChanged':
 //             updateAgentStatusUI(message.state);
 //             break;
+//             case 'checkpointCreated':
+//             // 체크포인트가 생성되면 목록 새로고침
+//             vscode.postMessage({ command: 'getCheckpoints' });
+//             break;
+//             case 'checkpointsList':
+//             updateCheckpointsUI(message.checkpoints);
+//             break;
 //             case 'generationStopped':
 //             endStreaming();
 //             break;
@@ -2901,10 +4076,70 @@
 
 //             function updateAgentStatusUI(state) {
 //             agentStatusBadge.textContent = state;
-//             if (state !== 'Idle' && state !== 'Done' && state !== 'Error') {
+//             // Plan Panel은 Plan 모드일 때만 표시 (Agent 모드에서 자동 Plan 생성 방지)
+//             if (currentMode === 'plan' && state !== 'Idle' && state !== 'Done' && state !== 'Error') {
 //             planPanel.classList.add('visible');
+//             } else if (currentMode !== 'plan') {
+//             planPanel.classList.remove('visible');
 //             }
 //             }
+
+//             function updateCheckpointsUI(checkpoints) {
+//             // Agent 모드이고 checkpoint가 활성화된 경우에만 checkpoints가 없어도 패널 표시
+//             if (!checkpoints || checkpoints.length === 0) {
+//             checkpointsList.innerHTML = '<div style="opacity:0.6; font-size:0.85em; padding:8px;">No checkpoints yet. Checkpoints will be created automatically before each step execution.</div>';
+//             // 패널 표시는 modeChanged 이벤트에서 처리됨
+//             return;
+//             }
+
+//             checkpointsPanel.classList.add('visible');
+//             checkpointsList.innerHTML = checkpoints.map(cp => {
+//             const date = new Date(cp.timestamp).toLocaleString();
+//             const desc = cp.stepDescription || 'Checkpoint';
+//             return '<div class="checkpoint-item" data-id="' + cp.id + '">' +
+//             '<div class="checkpoint-info">' +
+//             '<div class="checkpoint-description">' + escapeHtml(desc) + '</div>' +
+//             '<div class="checkpoint-meta">' + date + ' • ' + cp.fileCount + ' files</div>' +
+//             '</div>' +
+//             '<div class="checkpoint-actions">' +
+//             '<button class="checkpoint-btn compare" data-id="' + cp.id + '" title="Compare with current">Compare</button>' +
+//             '<button class="checkpoint-btn restore" data-id="' + cp.id + '" title="Restore workspace">Restore</button>' +
+//             '<button class="checkpoint-btn delete" data-id="' + cp.id + '" title="Delete checkpoint">×</button>' +
+//             '</div>' +
+//             '</div>';
+//             }).join('');
+
+//             // 이벤트 리스너 추가
+//             checkpointsList.querySelectorAll('.checkpoint-btn.compare').forEach(btn => {
+//             btn.addEventListener('click', (e) => {
+//             e.stopPropagation();
+//             vscode.postMessage({ command: 'compareCheckpoint', checkpointId: btn.dataset.id });
+//             });
+//             });
+
+//             checkpointsList.querySelectorAll('.checkpoint-btn.restore').forEach(btn => {
+//             btn.addEventListener('click', (e) => {
+//             e.stopPropagation();
+//             vscode.postMessage({ command: 'restoreCheckpoint', checkpointId: btn.dataset.id, restoreWorkspaceOnly: false });
+//             });
+//             });
+
+//             checkpointsList.querySelectorAll('.checkpoint-btn.delete').forEach(btn => {
+//             btn.addEventListener('click', (e) => {
+//             e.stopPropagation();
+//             vscode.postMessage({ command: 'deleteCheckpoint', checkpointId: btn.dataset.id });
+//             });
+//             });
+//             }
+
+//             if (refreshCheckpointsBtn) {
+//             refreshCheckpointsBtn.addEventListener('click', () => {
+//             vscode.postMessage({ command: 'getCheckpoints' });
+//             });
+//             }
+
+//             // Agent 모드이고 checkpoint가 활성화된 경우에만 체크포인트 목록 로드
+//             // (설정은 서버에서 확인되므로 여기서는 로드하지 않음, modeChanged 이벤트에서 처리됨)
 
 //             function updatePlanUI(plan) {
 //             if (!plan || plan.length === 0) {
@@ -2912,7 +4147,13 @@
 //             return;
 //             }
 
+//             // Plan Panel은 Plan 모드일 때만 표시
+//             if (currentMode === 'plan') {
 //             planPanel.classList.add('visible');
+//             } else {
+//             planPanel.classList.remove('visible');
+//             return;
+//             }
 //             planList.innerHTML = '';
 
 //             plan.forEach(step => {
@@ -2993,7 +4234,6 @@
 //             e.preventDefault();
 //             });
 
-//             window.insertCode = insertCode;
 //             window.runCommand = runCommand;
 //             }) ();
 

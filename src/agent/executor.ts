@@ -5,6 +5,7 @@ import {
     removeTrailingBackticks,
     removeControlCharacterArtifacts,
     unescapeHtmlEntities,
+    removeLeadingPipeArtifact,
 } from '../utils/contentUtils.js';
 import { logger } from '../utils/logger.js';
 
@@ -352,6 +353,7 @@ export class Executor {
 
         try {
             // 자동 실행 코드 제거, 백틱 정리, 제어문자 표기 제거, HTML entity 복원
+            content = removeLeadingPipeArtifact(content);
             content = removeAutoExecutionCode(content, path);
             content = removeTrailingBackticks(content);
             content = removeControlCharacterArtifacts(content);
@@ -407,7 +409,13 @@ export class Executor {
                 }
             }
         } catch (error) {
-            // 파일이 없는 경우 새로 생성 후 쓰기
+            // SEARCH/REPLACE 매칭 실패 → 파일을 garbage로 덮어쓰지 않고 오류를 상위로 전파
+            // (에이전트가 Fixing 단계에서 올바른 SEARCH 블록으로 재시도하게 함)
+            if (content.includes('<<<<<<< SEARCH')) {
+                throw error;
+            }
+
+            // 파일이 없는 경우(새 파일 생성 요청) 새로 생성 후 쓰기
             const newFileEdit = new vscode.WorkspaceEdit();
             newFileEdit.createFile(fileUri, { overwrite: true });
             newFileEdit.insert(fileUri, new vscode.Position(0, 0), content);
@@ -519,6 +527,7 @@ export class Executor {
             // 0. 전처리
             for (const op of operations) {
                 if (op.content && (op.operation === 'create' || op.operation === 'edit')) {
+                    op.content = removeLeadingPipeArtifact(op.content);
                     op.content = removeAutoExecutionCode(op.content, op.path);
                     op.content = removeTrailingBackticks(op.content);
                     op.content = removeControlCharacterArtifacts(op.content);
@@ -632,6 +641,7 @@ export class Executor {
     ): Promise<string> {
         for (const op of operations) {
             if (op.content && (op.operation === 'create' || op.operation === 'edit')) {
+                op.content = removeLeadingPipeArtifact(op.content);
                 op.content = removeAutoExecutionCode(op.content, op.path);
                 op.content = removeTrailingBackticks(op.content);
                 op.content = removeControlCharacterArtifacts(op.content);

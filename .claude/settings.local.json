@@ -4,7 +4,11 @@
       "Bash(npm install)",
       "Bash(npm run compile)",
       "Bash(wc -l:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(npm run bundle:*)",
+      "Bash(grep:*)",
+      "Bash(xxd:*)",
+      "Bash(node --check:*)"
     ]
   }
 }
