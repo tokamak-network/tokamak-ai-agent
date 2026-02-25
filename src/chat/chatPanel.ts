@@ -7,6 +7,7 @@ import {
     removeAutoExecutionCode,
     removeTrailingBackticks,
     removeControlCharacterArtifacts,
+    applySearchReplaceBlocks,
 } from '../utils/contentUtils.js';
 import { logger } from '../utils/logger.js';
 
@@ -946,6 +947,7 @@ REPLACE:
 \`\`\`
 <<<END_OPERATION>>>
 
+- **ONE block per file**: Use exactly ONE <<<FILE_OPERATION>>> block per file. If you need multiple changes to the same file, combine them into a single block using multiple SEARCH/REPLACE pairs inside one CONTENT field, or use write_full to rewrite the whole file.
 - Always explain what you're doing before the operations.
 - Ask for confirmation if the task is ambiguous.
 
@@ -1002,6 +1004,9 @@ export function helper() {
                 });
             }
         };
+        // invoke 파서가 <<<FILE_OPERATION>>> 블록 내부를 이중 파싱하지 않도록
+        // FILE_OPERATION 블록을 제거한 사본으로만 invoke를 파싱
+        const rawForInvoke = raw.replace(/<<<FILE_OPERATION>>>[\s\S]*?(?:<<<END_OPERATION>>>|(?=<<<FILE_OPERATION>>>)|$)/gi, '');
         const invokeNames: [RegExp, 'write_full' | 'replace' | 'edit' | 'prepend' | 'append'][] = [
             [/<invoke\s+name=["']write_to_file["']\s*>/gi, 'write_full'],
             [/<invoke\s+name=["']replace_in_file["']\s*>/gi, 'replace'],
@@ -1011,8 +1016,8 @@ export function helper() {
         ];
         for (const [invokeRe, toolType] of invokeNames) {
             let m: RegExpExecArray | null;
-            while ((m = invokeRe.exec(raw)) !== null) {
-                const afterInvoke = raw.slice(m.index + m[0].length);
+            while ((m = invokeRe.exec(rawForInvoke)) !== null) {
+                const afterInvoke = rawForInvoke.slice(m.index + m[0].length);
                 const closeIdx = afterInvoke.search(/<\s*\/\s*invoke\s*>/i);
                 const inner = closeIdx >= 0 ? afterInvoke.slice(0, closeIdx) : afterInvoke;
                 parseInvoke(inner, toolType);
@@ -1168,7 +1173,63 @@ export function helper() {
             }
         }
 
-        return operations;
+        // ── 1. 완전히 동일한 중복 제거 (path + type + content + search + replace 모두 같은 경우) ──
+        const seen = new Set<string>();
+        const deduped = operations.filter(op => {
+            const key = `${op.type}|${op.path}|${op.content ?? ''}|${op.search ?? ''}|${op.replace ?? ''}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+
+        // ── 2. 같은 파일에 write_full이 있으면 나머지 모두 제거 ──
+        const writeFullPaths = new Set(
+            deduped.filter(op => op.type === 'write_full').map(op => op.path)
+        );
+        const afterWriteFull = writeFullPaths.size > 0
+            ? deduped.filter(op => op.type === 'write_full' || !writeFullPaths.has(op.path))
+            : deduped;
+
+        // ── 3. 같은 파일에 대한 복수의 replace/edit 작업을 하나로 병합 ──
+        // Qwen3/GLM 등이 한 파일에 SEARCH/REPLACE 블록을 여러 개 생성할 때
+        // 각각을 <<<<<<< SEARCH...>>>>>>> REPLACE 형식으로 연결해 단일 작업으로 만든다.
+        const MERGE_TYPES = new Set<FileOperation['type']>(['replace', 'edit']);
+        const mergeGroups = new Map<string, FileOperation[]>();
+        const finalOps: FileOperation[] = [];
+
+        for (const op of afterWriteFull) {
+            if (MERGE_TYPES.has(op.type)) {
+                const key = op.path;
+                if (!mergeGroups.has(key)) mergeGroups.set(key, []);
+                mergeGroups.get(key)!.push(op);
+            } else {
+                finalOps.push(op);
+            }
+        }
+
+        for (const [, group] of mergeGroups) {
+            if (group.length === 1) {
+                finalOps.push(group[0]);
+            } else {
+                // 여러 SEARCH/REPLACE 쌍을 하나의 CONTENT 문자열로 병합
+                const combinedContent = group.map(op => {
+                    const s = op.search ?? op.content ?? '';
+                    const r = op.replace ?? op.content ?? '';
+                    return `<<<<<<< SEARCH\n${s}\n=======\n${r}\n>>>>>>> REPLACE`;
+                }).join('\n\n');
+
+                finalOps.push({
+                    type: 'replace',
+                    path: group[0].path,
+                    description: group.map(o => o.description).filter(Boolean).join(' / '),
+                    content: combinedContent,
+                    search: undefined,
+                    replace: undefined,
+                });
+            }
+        }
+
+        return finalOps;
     }
 
     /** AI가 SEARCH 블록 없이 코드를 보냈을 때, 앞/뒤 줄을 기준으로 바꿔치기를 시도하는 헬퍼 함수 */
@@ -1358,62 +1419,31 @@ export function helper() {
 
                         let anyApplied = false;
 
-                        // 1. Explicit SEARCH and REPLACE parameters natively parsed
+                        // 4-tier SEARCH/REPLACE (exact → line-trimmed → block-anchor → full-file)
+                        // Path 1: explicit search + replace fields → diff 형식으로 변환
+                        // Path 2: <<<<<<< SEARCH block inside content
                         if (op.search && op.replace !== undefined) {
-                            let trimmedSearch = removeControlCharacterArtifacts(op.search);
-                            let trimmedReplace = removeControlCharacterArtifacts(op.replace);
-
-                            if (trimmedSearch !== trimmedReplace) {
-                                const searchLines = trimmedSearch.split('\n').length;
-                                const replaceLines = trimmedReplace.split('\n').length;
-                                const searchLength = trimmedSearch.length;
-                                const replaceLength = trimmedReplace.length;
-
-                                if (trimmedReplace === '' || (searchLines > 3 && replaceLines === 0) || (searchLength > 100 && replaceLength < searchLength * 0.3)) {
-                                    vscode.window.showWarningMessage(`⚠️ 의심스러운 코드 삭제 감지: ${op.path}. 스킵합니다.`, '확인');
-                                } else if (currentContent.includes(trimmedSearch)) {
-                                    currentContent = currentContent.replace(trimmedSearch, trimmedReplace);
-                                    anyApplied = true;
-                                } else {
-                                    vscode.window.showErrorMessage(`[${op.type}] ${op.path}: 찾을 코드가 파일 내에 정확히 존재하지 않습니다 (띄어쓰기/들여쓰기 확인 필요).`);
-                                    errorCount++;
-                                    break;
-                                }
+                            const s = removeControlCharacterArtifacts(op.search);
+                            const r = removeControlCharacterArtifacts(op.replace);
+                            const diff = `<<<<<<< SEARCH\n${s}\n=======\n${r}\n>>>>>>> REPLACE`;
+                            const result = applySearchReplaceBlocks(currentContent, diff);
+                            if (result !== null) {
+                                currentContent = result;
+                                anyApplied = true;
                             } else {
-                                anyApplied = true; // No-op but successful
+                                vscode.window.showErrorMessage(`[${op.type}] ${op.path}: 찾을 코드가 파일 내에 정확히 존재하지 않습니다 (띄어쓰기/들여쓰기 확인 필요).`);
+                                errorCount++;
+                                break;
                             }
-                        }
-                        // 2. Legacy <<<<<<< SEARCH inside content
-                        else if (op.content !== undefined && op.content.includes('<<<<<<< SEARCH')) {
-                            const blocks = op.content.split(/>>>>>>> REPLACE\s*/);
-                            for (const block of blocks) {
-                                if (!block.includes('<<<<<<< SEARCH')) continue;
-                                const parts = block.split(/=======/);
-                                if (parts.length !== 2) continue;
-
-                                let trimmedSearch = removeControlCharacterArtifacts(parts[0].split(/<<<<<<< SEARCH\s*/)[1].trim());
-                                let trimmedReplace = removeControlCharacterArtifacts(parts[1].trim());
-
-                                if (trimmedSearch && trimmedReplace !== undefined) {
-                                    if (trimmedSearch === trimmedReplace) {
-                                        anyApplied = true;
-                                        continue;
-                                    }
-                                    const searchLines = trimmedSearch.split('\n').length;
-                                    const replaceLines = trimmedReplace.split('\n').length;
-                                    const searchLength = trimmedSearch.length;
-                                    const replaceLength = trimmedReplace.length;
-
-                                    if (trimmedReplace === '' || (searchLines > 3 && replaceLines === 0) || (searchLength > 100 && replaceLength < searchLength * 0.3)) {
-                                        vscode.window.showWarningMessage(`⚠️ 의심스러운 코드 삭제 감지: ${op.path}. 스킵합니다.`, '확인');
-                                        continue;
-                                    }
-
-                                    if (currentContent.includes(trimmedSearch)) {
-                                        currentContent = currentContent.replace(trimmedSearch, trimmedReplace);
-                                        anyApplied = true;
-                                    }
-                                }
+                        } else if (op.content !== undefined && op.content.includes('<<<<<<< SEARCH')) {
+                            const result = applySearchReplaceBlocks(currentContent, op.content);
+                            if (result !== null) {
+                                currentContent = result;
+                                anyApplied = true;
+                            } else {
+                                vscode.window.showErrorMessage(`[${op.type}] ${op.path}: 찾을 코드가 파일 내에 정확히 존재하지 않습니다 (띄어쓰기/들여쓰기 확인 필요).`);
+                                errorCount++;
+                                break;
                             }
                         }
                         // 3. Description 기반 단순 텍스트 교체 (LLM이 content만 주고 search를 안 준 경우에 대한 스마트 폴백)
