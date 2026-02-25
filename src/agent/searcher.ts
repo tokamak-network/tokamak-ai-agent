@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { logger } from '../utils/logger.js';
 
 export interface FileMetadata {
     path: string;
@@ -75,8 +76,9 @@ export class Searcher {
                     const content = await vscode.workspace.fs.readFile(uri);
                     const text = Buffer.from(content).toString('utf8');
 
-                    // 키워드 검색 (대소문자 구분 없이)
-                    const regex = new RegExp(`\\b${keyword}\\b`, 'i');
+                    // 키워드 검색 (대소문자 구분 없이) — 특수문자 이스케이프로 regex 인젝션 방지
+                    const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const regex = new RegExp(`\\b${escapedKeyword}\\b`, 'i');
                     if (regex.test(text)) {
                         const relPath = vscode.workspace.asRelativePath(uri);
                         // 파일 내용 매칭은 파일명 매칭보다 훨씬 낮은 가중치 (3점)
@@ -90,7 +92,7 @@ export class Searcher {
             }
         } catch (error) {
             // 파일 검색 실패해도 계속 진행 (파일명 검색 결과는 유지)
-            console.warn(`[Searcher] Content search failed for keyword "${keyword}":`, error);
+            logger.warn('[Searcher]', `Content search failed for keyword "${keyword}"`, error);
         }
     }
 

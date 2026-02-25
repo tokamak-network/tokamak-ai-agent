@@ -1,8 +1,14 @@
 import * as vscode from 'vscode';
-import { streamChatCompletion, ChatMessage } from '../api/client.js';
+import { streamChatCompletion, ChatMessage, isVisionCapable } from '../api/client.js';
 import { isConfigured, promptForConfiguration, getAvailableModels, getSelectedModel, setSelectedModel, isCheckpointsEnabled } from '../config/settings.js';
 import { AgentEngine } from '../agent/engine.js';
 import { AgentContext } from '../agent/types.js';
+import {
+    removeAutoExecutionCode,
+    removeTrailingBackticks,
+    removeControlCharacterArtifacts,
+} from '../utils/contentUtils.js';
+import { logger } from '../utils/logger.js';
 
 type ChatMode = 'ask' | 'plan' | 'agent';
 
@@ -143,10 +149,19 @@ export class ChatPanel {
                 });
             },
             onCheckpointCreated: (checkpointId) => {
-                console.log(`[ChatPanel] Checkpoint created callback: ${checkpointId}`);
+                logger.info('[ChatPanel]', `Checkpoint created callback: ${checkpointId}`);
                 this.panel.webview.postMessage({ command: 'checkpointCreated', checkpointId });
-                // 즉시 checkpoints 목록 새로고침
                 this.getCheckpoints();
+            },
+            // ── 실시간 스트리밍 콜백 ──────────────────────────────────────────
+            onStreamStart: () => {
+                this.panel.webview.postMessage({ command: 'startStreaming' });
+            },
+            onStreamChunk: (chunk) => {
+                this.panel.webview.postMessage({ command: 'streamChunk', content: chunk });
+            },
+            onStreamEnd: () => {
+                this.panel.webview.postMessage({ command: 'endStreaming' });
             }
         };
         this.agentEngine = new AgentEngine(context);
@@ -590,7 +605,7 @@ export class ChatPanel {
                 // File doesn't exist in workspace
             }
         } catch (error) {
-            console.error('Error resolving file path:', error);
+            logger.error('[ChatPanel]', 'Error resolving file path', error);
         }
     }
 
@@ -1147,78 +1162,13 @@ export function helper() {
         // 자동 실행 코드 제거, 백틱 정리, 제어문자 표기 제거
         for (const op of operations) {
             if (op.content && (op.type === 'create' || op.type === 'edit' || op.type === 'write_full' || op.type === 'replace' || op.type === 'prepend' || op.type === 'append')) {
-                op.content = this.removeAutoExecutionCode(op.content, op.path);
-                op.content = this.removeTrailingBackticks(op.content);
-                op.content = this.removeControlCharacterArtifacts(op.content);
+                op.content = removeAutoExecutionCode(op.content, op.path);
+                op.content = removeTrailingBackticks(op.content);
+                op.content = removeControlCharacterArtifacts(op.content);
             }
         }
 
         return operations;
-    }
-
-    /** 코드 끝에 남아있는 백틱(```) 제거 */
-    private removeTrailingBackticks(content: string): string {
-        if (!content) return content;
-        let cleaned = content;
-        // 끝에 있는 백틱 제거 (줄바꿈 포함)
-        cleaned = cleaned.replace(/\n*```+\s*$/m, '');
-        cleaned = cleaned.replace(/```+\s*$/m, '');
-        // 여러 줄의 백틱 제거
-        cleaned = cleaned.replace(/(\n```+\s*)+$/m, '');
-        return cleaned.trimEnd();
-    }
-
-    /** AI 응답에 붙는 제어문자 표기(<ctrl46> 등) 및 실제 제어문자 제거 */
-    private removeControlCharacterArtifacts(content: string): string {
-        if (!content) return content;
-        let cleaned = content;
-        // VS Code 등에서 제어문자를 표시할 때 쓰는 <ctrlNN> 형태 완전 제거
-        cleaned = cleaned.replace(/<ctrl\d+>/gi, ''); // 모든 <ctrl숫자> 제거
-        cleaned = cleaned.replace(/\s*<ctrl\d+>\s*/gi, ''); // 공백 포함 제거
-        // 실제 ASCII 제어문자 제거 (줄바꿈\n, 탭\t, 캐리지리턴\r 제외)
-        cleaned = cleaned.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
-        // 연속된 빈 줄 정리
-        cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
-        return cleaned.trimEnd();
-    }
-
-    /** 테스트 파일 등에서 자동 실행 코드(run(), main() 등) 제거 */
-    private removeAutoExecutionCode(content: string, filePath: string): string {
-        if (!content) return content;
-
-        // 테스트 파일인지 확인 (경로에 test/spec 포함 또는 확장자 확인)
-        const isTestFile = /test|spec/i.test(filePath) ||
-            /\.(test|spec)\.(ts|js|tsx|jsx|py|go|java)$/i.test(filePath);
-
-        // 모든 파일에서 제거하되, 테스트 파일은 더 엄격하게
-        let cleaned = content;
-
-        // JavaScript/TypeScript 패턴 제거
-        // run(); 또는 run() (줄 끝)
-        cleaned = cleaned.replace(/^\s*run\(\)\s*;?\s*$/gm, '');
-        // function run() { ... } run(); 패턴
-        cleaned = cleaned.replace(/\n\s*function\s+run\(\)\s*\{[\s\S]*?\}\s*\n\s*run\(\)\s*;?\s*$/m, '');
-        // const run = () => { ... }; run(); 패턴
-        cleaned = cleaned.replace(/\n\s*(const|let|var)\s+run\s*=\s*[^;]+;\s*\n\s*run\(\)\s*;?\s*$/m, '');
-
-        // main() 호출 제거
-        cleaned = cleaned.replace(/^\s*main\(\)\s*;?\s*$/gm, '');
-
-        // Python 패턴 제거
-        cleaned = cleaned.replace(/\n\s*if\s+__name__\s*==\s*['"]__main__['"]\s*:\s*\n[\s\S]*$/m, '');
-
-        // Node.js 패턴 제거
-        cleaned = cleaned.replace(/\n\s*if\s+require\.main\s*===\s*module\s*\{[\s\S]*?\}\s*$/m, '');
-
-        // "All tests passed" 같은 메시지와 함께 있는 run() 호출 제거
-        cleaned = cleaned.replace(/\n\s*console\.log\(['"]All tests passed['"]\)\s*;?\s*\n\s*run\(\)\s*;?\s*$/m, '');
-        cleaned = cleaned.replace(/\n\s*console\.log\(['"]All tests passed['"]\)\s*;?\s*$/m, '');
-
-        // 마지막 빈 줄 정리
-        cleaned = cleaned.replace(/\n{3,}$/, '\n\n');
-        cleaned = cleaned.trimEnd();
-
-        return cleaned;
     }
 
     /** AI가 SEARCH 블록 없이 코드를 보냈을 때, 앞/뒤 줄을 기준으로 바꿔치기를 시도하는 헬퍼 함수 */
@@ -1410,8 +1360,8 @@ export function helper() {
 
                         // 1. Explicit SEARCH and REPLACE parameters natively parsed
                         if (op.search && op.replace !== undefined) {
-                            let trimmedSearch = this.removeControlCharacterArtifacts(op.search);
-                            let trimmedReplace = this.removeControlCharacterArtifacts(op.replace);
+                            let trimmedSearch = removeControlCharacterArtifacts(op.search);
+                            let trimmedReplace = removeControlCharacterArtifacts(op.replace);
 
                             if (trimmedSearch !== trimmedReplace) {
                                 const searchLines = trimmedSearch.split('\n').length;
@@ -1441,8 +1391,8 @@ export function helper() {
                                 const parts = block.split(/=======/);
                                 if (parts.length !== 2) continue;
 
-                                let trimmedSearch = this.removeControlCharacterArtifacts(parts[0].split(/<<<<<<< SEARCH\s*/)[1].trim());
-                                let trimmedReplace = this.removeControlCharacterArtifacts(parts[1].trim());
+                                let trimmedSearch = removeControlCharacterArtifacts(parts[0].split(/<<<<<<< SEARCH\s*/)[1].trim());
+                                let trimmedReplace = removeControlCharacterArtifacts(parts[1].trim());
 
                                 if (trimmedSearch && trimmedReplace !== undefined) {
                                     if (trimmedSearch === trimmedReplace) {
@@ -1550,7 +1500,7 @@ export function helper() {
                 }
             } catch (error) {
                 errorCount++;
-                console.error(`Failed to stage ${op.type} for ${op.path}:`, error);
+                logger.error('[ChatPanel]', `Failed to stage ${op.type} for ${op.path}`, error);
             }
         }
 
@@ -1586,7 +1536,7 @@ export function helper() {
                                 await vscode.workspace.fs.writeFile(fileUri, Buffer.from(op.content, 'utf8'));
                             }
                         } catch (fsError) {
-                            console.error(`Failed to save ${fileUri.fsPath}:`, fsError);
+                            logger.error('[ChatPanel]', `Failed to save ${fileUri.fsPath}`, fsError);
                         }
                     }
                 }
@@ -1594,7 +1544,7 @@ export function helper() {
                 vscode.window.showInformationMessage(`Successfully applied and saved ${successCount} file operation(s).`);
             }
         } else {
-            console.error('[ChatPanel] WorkspaceEdit failed. Check for read-only files or conflicting edits.');
+            logger.error('[ChatPanel]', 'WorkspaceEdit failed. Check for read-only files or conflicting edits.');
             if (successCount > 0) {
                 vscode.window.showErrorMessage(`Failed to apply ${successCount} operation(s) via WorkspaceEdit. Please verify file permissions.`);
             } else if (errorCount > 0) {
@@ -1608,7 +1558,7 @@ export function helper() {
 
     private async getCheckpoints(): Promise<void> {
         if (!this.agentEngine) {
-            console.log('[ChatPanel] getCheckpoints: agentEngine not available');
+            logger.info('[ChatPanel]', 'getCheckpoints: agentEngine not available');
             this.panel.webview.postMessage({
                 command: 'checkpointsList',
                 checkpoints: []
@@ -1618,7 +1568,7 @@ export function helper() {
 
         const checkpointManager = this.agentEngine.getCheckpointManager();
         if (!checkpointManager) {
-            console.log('[ChatPanel] getCheckpoints: checkpointManager not available');
+            logger.info('[ChatPanel]', 'getCheckpoints: checkpointManager not available');
             this.panel.webview.postMessage({
                 command: 'checkpointsList',
                 checkpoints: []
@@ -1627,7 +1577,7 @@ export function helper() {
         }
 
         const checkpoints = checkpointManager.getCheckpoints();
-        console.log(`[ChatPanel] getCheckpoints: found ${checkpoints.length} checkpoints`);
+        logger.info('[ChatPanel]', `getCheckpoints: found ${checkpoints.length} checkpoints`);
         this.panel.webview.postMessage({
             command: 'checkpointsList',
             checkpoints: checkpoints.map(cp => ({
@@ -1793,7 +1743,7 @@ export function helper() {
                 const proposedUri = vscode.Uri.parse(`tokamak-preview:${operation.path}`);
                 let proposedContent = operation.content || '';
                 // 제어문자 제거 (diff 미리보기용)
-                proposedContent = this.removeControlCharacterArtifacts(proposedContent);
+                proposedContent = removeControlCharacterArtifacts(proposedContent);
 
                 const provider = new (class implements vscode.TextDocumentContentProvider {
                     provideTextDocumentContent(): string { return proposedContent; }
@@ -1807,7 +1757,7 @@ export function helper() {
                 try {
                     const existingData = await vscode.workspace.fs.readFile(fileUri);
                     const existingContent = Buffer.from(existingData).toString('utf8');
-                    const text = this.removeControlCharacterArtifacts((operation.content || '').trim());
+                    const text = removeControlCharacterArtifacts((operation.content || '').trim());
                     const proposedContent = operation.type === 'prepend'
                         ? text + '\n\n' + existingContent
                         : existingContent.trimEnd() + '\n\n' + text;
@@ -1830,7 +1780,7 @@ export function helper() {
                 try {
                     const existingData = await vscode.workspace.fs.readFile(fileUri);
                     const existingContent = Buffer.from(existingData).toString('utf8');
-                    let proposedContent = this.removeControlCharacterArtifacts(operation.content || '');
+                    let proposedContent = removeControlCharacterArtifacts(operation.content || '');
                     const normalize = (s: string) => s.replace(/\r\n|\r/g, '\n').trim();
                     if (normalize(existingContent) === normalize(proposedContent)) {
                         vscode.window.showInformationMessage(`[write_full] ${operation.path}: 적용 예정 내용이 현재 파일과 동일합니다.`);
@@ -1854,8 +1804,8 @@ export function helper() {
 
                     // 1. Explicit SEARCH and REPLACE parameters
                     if (operation.search && operation.replace !== undefined) {
-                        let searchContent = this.removeControlCharacterArtifacts(operation.search);
-                        let replaceContent = this.removeControlCharacterArtifacts(operation.replace);
+                        let searchContent = removeControlCharacterArtifacts(operation.search);
+                        let replaceContent = removeControlCharacterArtifacts(operation.replace);
 
                         if (searchContent !== replaceContent && existingContent.includes(searchContent)) {
                             proposedContent = existingContent.replace(searchContent, replaceContent);
@@ -1877,8 +1827,8 @@ export function helper() {
                             let searchContent = searchParts[0].split('<<<<<<< SEARCH')[1]?.trim();
                             let replaceContent = searchParts[1]?.trim();
                             // 제어문자 제거
-                            if (searchContent) searchContent = this.removeControlCharacterArtifacts(searchContent);
-                            if (replaceContent) replaceContent = this.removeControlCharacterArtifacts(replaceContent);
+                            if (searchContent) searchContent = removeControlCharacterArtifacts(searchContent);
+                            if (replaceContent) replaceContent = removeControlCharacterArtifacts(replaceContent);
 
                             if (searchContent !== undefined && replaceContent !== undefined) {
                                 // SEARCH와 REPLACE가 동일하면 스킵 (불필요한 변경 방지)
@@ -1925,7 +1875,7 @@ export function helper() {
                     }
 
                     // 최종적으로 제어문자 제거 (diff 미리보기용)
-                    proposedContent = this.removeControlCharacterArtifacts(proposedContent);
+                    proposedContent = removeControlCharacterArtifacts(proposedContent);
 
                     // 변경 전/후가 동일하면 diff 창을 열지 않음 (Apply 전에 이미 적용됐거나 내용 동일 시)
                     const normalize = (s: string) => s.replace(/\r\n|\r/g, '\n').trim();
@@ -2039,7 +1989,12 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             }
         }
         if (attachedImages.length > 0) {
-            displayText += `\n\n🖼️ ${attachedImages.length} images attached (pasted)`;
+            const currentModel = getSelectedModel();
+            if (isVisionCapable(currentModel)) {
+                displayText += `\n\n🖼️ ${attachedImages.length}개 이미지 첨부됨`;
+            } else {
+                displayText += `\n\n⚠️ ${attachedImages.length}개 이미지 첨부됨 — **${currentModel}** 모델은 vision을 지원하지 않습니다. 이미지는 전송되지 않습니다.`;
+            }
         }
 
         // Send user message to UI

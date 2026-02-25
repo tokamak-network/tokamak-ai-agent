@@ -35,7 +35,7 @@ export class Planner {
                 }
 
                 const idMatch = description.match(/^(\w+):\s*/);
-                let id = `step-\${steps.length}`;
+                let id = `step-${steps.length}`;
                 if (idMatch) {
                     id = idMatch[1];
                     description = description.replace(idMatch[0], '').trim();
@@ -118,8 +118,8 @@ ${newContext}
 `;
 
         let aiResponse = '';
-        const stream = streamFn([{ role: 'user', content: prompt }]);
-        for await (const chunk of stream) {
+        const streamResult = streamFn([{ role: 'user', content: prompt }]);
+        for await (const chunk of streamResult.content) {
             aiResponse += chunk;
         }
 

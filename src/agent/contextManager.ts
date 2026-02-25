@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { FileMetadata } from './searcher.js';
 import { Executor } from './executor.js';
 import { Summarizer } from './summarizer.js';
+import { logger } from '../utils/logger.js';
 
 export interface ContextItem {
     path: string;
@@ -24,29 +25,30 @@ export class ContextManager {
      * 중요도가 높지만 큰 파일은 요약본을 사용합니다.
      */
     public async assembleContext(files: FileMetadata[]): Promise<string> {
-        let contextParts: string[] = [];
+        const contextParts: string[] = [];
         let currentEstimatedTokens = 0;
 
         for (const file of files) {
             try {
                 const content = await this.executor.readFile(file.path);
-                const estimatedTokens = content.length / 4;
+                // 유니코드(한국어 등) 고려: 글자당 평균 ~3자 = 1토큰
+                const estimatedTokens = content.length / 3;
 
-                // 예산이 충분하고 파일이 작으면 전체 내용 포함
                 if (currentEstimatedTokens + estimatedTokens < this.MAX_TOKENS && content.length < this.SUMMARY_THRESHOLD) {
-                    contextParts.push(`--- FILE: \${file.path} (Full, Score: \${file.score}) ---\n\${content}\n`);
+                    // 예산이 충분하고 파일이 작으면 전체 내용 포함
+                    contextParts.push(`--- FILE: ${file.path} (Full, Score: ${file.score}) ---\n${content}\n`);
                     currentEstimatedTokens += estimatedTokens;
                 } else if (currentEstimatedTokens < this.MAX_TOKENS) {
                     // 크기가 크거나 예산이 아슬아슬하면 요약본 포함
-                    console.log(`[ContextManager] Summarizing heavy file: \${file.path}`);
+                    logger.info('[ContextManager]', `Summarizing heavy file: ${file.path}`);
                     const summary = await this.summarizer.summarize(file.path, content);
-                    contextParts.push(`--- FILE: \${file.path} (Summary, Score: \${file.score}) ---\n\${summary}\n`);
-                    currentEstimatedTokens += (summary.length / 4);
+                    contextParts.push(`--- FILE: ${file.path} (Summary, Score: ${file.score}) ---\n${summary}\n`);
+                    currentEstimatedTokens += summary.length / 3;
                 } else {
-                    contextParts.push(`--- FILE: \${file.path} (Skipped, Score: \${file.score}) ---\n`);
+                    contextParts.push(`--- FILE: ${file.path} (Skipped — token budget exhausted, Score: ${file.score}) ---\n`);
                 }
             } catch (error) {
-                console.warn(`Failed to read file for context: \${file.path}`);
+                logger.warn('[ContextManager]', `Failed to read file for context: ${file.path}`);
             }
         }
 

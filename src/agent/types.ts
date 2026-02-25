@@ -35,7 +35,11 @@ export interface AgentContext {
     onStateChange?: (state: AgentState) => void;
     onPlanChange?: (plan: PlanStep[]) => void;
     onMessage?: (role: string, content: string) => void;
-    onCheckpointCreated?: (checkpointId: string) => void; // 체크포인트 생성 콜백
+    onCheckpointCreated?: (checkpointId: string) => void;
+    /** 실시간 스트리밍 콜백 — agent 각 단계의 AI 응답을 UI에 실시간 표시 */
+    onStreamStart?: () => void;
+    onStreamChunk?: (chunk: string) => void;
+    onStreamEnd?: () => void;
 }
 
 export interface AgentAction {

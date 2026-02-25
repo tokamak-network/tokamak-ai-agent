@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { logger } from '../utils/logger.js';
 
 export interface FileDependency {
     path: string;
@@ -35,7 +36,7 @@ export class DependencyAnalyzer {
                 dependents: [] // 역방향 의존성은 별도로 계산
             };
         } catch (error) {
-            console.warn(`[DependencyAnalyzer] Failed to analyze ${path}:`, error);
+            logger.warn('[DependencyAnalyzer]', `Failed to analyze ${path}`, error);
             return { path, imports: [], exports: [], dependents: [] };
         }
     }

@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(npm install)",
-      "Bash(npm run compile)"
+      "Bash(npm run compile)",
+      "Bash(wc -l:*)",
+      "Bash(npx tsc:*)"
     ]
   }
 }

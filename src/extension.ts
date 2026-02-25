@@ -4,9 +4,11 @@ import { InlineCompletionProvider } from './completion/inlineCompletionProvider.
 import { explainCode, refactorCode, disposeOutputChannel } from './codeActions/codeActionProvider.js';
 import { resetClient } from './api/client.js';
 import { setSettingsContext } from './config/settings.js';
+import { logger } from './utils/logger.js';
 
 export function activate(context: vscode.ExtensionContext): void {
-    console.log('Tokamak AI Agent is now active!');
+    logger.init(context);
+    logger.info('[Extension]', 'Tokamak AI Agent is now active!');
 
     // Set context for settings and ChatPanel
     setSettingsContext(context);

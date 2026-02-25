@@ -7,8 +7,48 @@ import { Searcher } from './searcher.js';
 import { ContextManager } from './contextManager.js';
 import { DependencyAnalyzer } from './dependencyAnalyzer.js';
 import { CheckpointManager, Checkpoint } from './checkpointManager.js';
-import { streamChatCompletion } from '../api/client.js';
+import { streamChatCompletion, ChatMessage } from '../api/client.js';
 import { isCheckpointsEnabled } from '../config/settings.js';
+import { logger } from '../utils/logger.js';
+
+/**
+ * AI 응답 텍스트에서 가장 바깥쪽 JSON 객체를 올바르게 추출합니다.
+ * 중첩된 {} 와 문자열 내부의 {} 를 모두 정확히 처리합니다.
+ * naive regex(/\{[\s\S]*\}/) 대신 사용하세요.
+ */
+function extractJsonFromText(text: string): string | null {
+    const start = text.indexOf('{');
+    if (start === -1) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = start; i < text.length; i++) {
+        const ch = text[i];
+
+        if (escape) {
+            escape = false;
+            continue;
+        }
+        if (ch === '\\' && inString) {
+            escape = true;
+            continue;
+        }
+        if (ch === '"') {
+            inString = !inString;
+            continue;
+        }
+        if (inString) continue;
+
+        if (ch === '{') depth++;
+        if (ch === '}') {
+            depth--;
+            if (depth === 0) return text.slice(start, i + 1);
+        }
+    }
+    return null;
+}
 
 export class AgentEngine {
     private state: AgentState = 'Idle';
@@ -16,6 +56,8 @@ export class AgentEngine {
     private context: AgentContext;
     private currentStepIndex: number = -1;
     private fixAttempts: Map<string, number> = new Map();
+    /** Cline의 consecutiveMistakeCount 패턴: 연속 실패 횟수 추적. 성공 시 0으로 리셋. */
+    private consecutiveMistakeCount: number = 0;
     private planner: Planner = new Planner();
     private executor: Executor = new Executor();
     private observer: Observer = new Observer();
@@ -34,15 +76,15 @@ export class AgentEngine {
             this.checkpointManager = new CheckpointManager(context.extensionContext);
             // 체크포인트 로드
             this.checkpointManager.loadCheckpoints().catch(err => {
-                console.warn('[AgentEngine] Failed to load checkpoints:', err);
+                logger.warn('[AgentEngine]', 'Failed to load checkpoints', err);
             });
         } else if (!isCheckpointsEnabled()) {
-            console.log('[AgentEngine] Checkpoints disabled in settings');
+            logger.info('[AgentEngine]', 'Checkpoints disabled in settings');
         }
     }
 
     public async transitionTo(nextState: AgentState): Promise<void> {
-        console.log(`[AgentEngine] Transitioning from ${this.state} to ${nextState}`);
+        logger.info('[AgentEngine]', `Transitioning from ${this.state} to ${nextState}`);
         this.state = nextState;
         if (this.context.onStateChange) {
             this.context.onStateChange(nextState);
@@ -108,13 +150,13 @@ export class AgentEngine {
                 }
             }
         } catch (error) {
-            console.error('[AgentEngine] Critical Error in Loop:', error);
+            logger.error('[AgentEngine]', 'Critical Error in Loop', error);
             await this.transitionTo('Error');
         }
     }
 
     private async handlePlanning(): Promise<void> {
-        console.log('[AgentEngine] Planning phase started...');
+        logger.info('[AgentEngine]', 'Planning phase started...');
 
         try {
             // [Phase 4] Global RAG: 관련 파일 검색 및 컨텍스트 구성
@@ -142,22 +184,18 @@ ${globalContext}
    예: "- [ ] npm run build 실행하여 빌드 성공 확인"
 `;
 
-            let aiResponse = '';
-            const streamResult = streamChatCompletion([{ role: 'user', content: prompt }]);
-            for await (const chunk of streamResult.content) {
-                aiResponse += chunk;
-            }
+            const aiResponse = await this.streamWithUI([{ role: 'user', content: prompt }]);
 
             this.plan = this.planner.parsePlan(aiResponse);
             if (this.plan.length > 0) {
                 this.notifyPlanChange();
                 await this.transitionTo('Executing');
             } else {
-                console.warn('[AgentEngine] No plan extracted.');
+                logger.warn('[AgentEngine]', 'No plan extracted.');
                 await this.transitionTo('Done');
             }
         } catch (error) {
-            console.error('[AgentEngine] Planning failed:', error);
+            logger.error('[AgentEngine]', 'Planning failed', error);
             await this.transitionTo('Error');
         }
     }
@@ -169,7 +207,7 @@ ${globalContext}
             if (allDone) {
                 await this.transitionTo('Done');
             } else {
-                console.warn('[AgentEngine] No executable steps found.');
+                logger.warn('[AgentEngine]', 'No executable steps found.');
                 await this.transitionTo('Idle');
             }
             return;
@@ -183,7 +221,7 @@ ${globalContext}
         let checkpointId: string | undefined;
         if (this.checkpointManager) {
             try {
-                console.log(`[AgentEngine] Creating checkpoint before step: ${step.id} - ${step.description}`);
+                logger.info('[AgentEngine]', `Creating checkpoint before step: ${step.id} - ${step.description}`);
                 checkpointId = await this.checkpointManager.createCheckpoint(
                     step.description,
                     step.id,
@@ -193,15 +231,15 @@ ${globalContext}
                         currentStepIndex: this.currentStepIndex,
                     }
                 );
-                console.log(`[AgentEngine] Checkpoint created: ${checkpointId}`);
+                logger.info('[AgentEngine]', `Checkpoint created: ${checkpointId}`);
                 if (this.context.onCheckpointCreated) {
                     this.context.onCheckpointCreated(checkpointId);
                 }
             } catch (error) {
-                console.error('[AgentEngine] Failed to create checkpoint:', error);
+                logger.error('[AgentEngine]', 'Failed to create checkpoint', error);
             }
         } else {
-            console.warn('[AgentEngine] CheckpointManager not available - extensionContext may not be set');
+            logger.warn('[AgentEngine]', 'CheckpointManager not available - extensionContext may not be set');
         }
 
         try {
@@ -210,7 +248,7 @@ ${globalContext}
             // [Strategy] 지연 액션 생성 (Lazy Action Generation)
             // 계획 수립 시점에 액션이 없었다면, 실행 직전에 AI에게 구체적인 액션을 요청함
             if (!step.action) {
-                console.log(`[AgentEngine] Generating action for step: ${step.id}`);
+                logger.info('[AgentEngine]', `Generating action for step: ${step.id}`);
                 const relevantFiles = await this.searcher.searchRelevantFiles(step.description);
                 const stepContext = await this.contextManager.assembleContext(relevantFiles);
 
@@ -266,14 +304,9 @@ ${stepContext}
 
 답변에는 마크다운 없이 오직 JSON만 포함하거나, \`\`\`json 블록으로 감싸주세요.
 `;
-                let aiResponse = '';
-                const streamResult = streamChatCompletion([{ role: 'user', content: prompt }]);
-                for await (const chunk of streamResult.content) {
-                    aiResponse += chunk;
-                }
-                // JSON 부분만 추출
-                const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
-                step.action = jsonMatch ? jsonMatch[0] : aiResponse;
+                const aiResponse = await this.streamWithUI([{ role: 'user', content: prompt }]);
+                // JSON 부분만 추출 (중첩 JSON을 올바르게 처리)
+                step.action = extractJsonFromText(aiResponse) ?? undefined;
             }
 
             if (step.action) {
@@ -282,7 +315,7 @@ ${stepContext}
                     const cleanAction = step.action.replace(/^```json\s*|^```\s*|```$/g, '').trim();
                     action = JSON.parse(cleanAction);
                 } catch (e) {
-                    console.warn('[AgentEngine] Failed to parse action JSON, falling back to raw write.', e);
+                    logger.warn('[AgentEngine]', 'Failed to parse action JSON, falling back to raw write.', e);
                     // 폴백: JSON 파싱 실패 시 내용을 그대로 파일 쓰기로 간주 (위험할 수 있음)
                     const pathMatch = step.description.match(/(`|'|")(.+?\.\w+)\1/);
                     if (pathMatch) {
@@ -319,9 +352,11 @@ ${stepContext}
             }
 
             step.status = 'done';
+            this.consecutiveMistakeCount = 0; // 성공 시 연속 실패 카운터 리셋
             this.notifyPlanChange();
             await this.transitionTo('Observing');
         } catch (error) {
+            this.consecutiveMistakeCount++;
             step.status = 'failed';
             step.result = error instanceof Error ? error.message : 'Unknown error';
             this.notifyPlanChange();
@@ -382,35 +417,30 @@ ${stepContext}
 `;
 
         try {
-            let aiResponse = '';
-            const streamResult = streamChatCompletion([{ role: 'user', content: prompt }]);
-            for await (const chunk of streamResult.content) {
-                aiResponse += chunk;
-            }
-
+            const aiResponse = await this.streamWithUI([{ role: 'user', content: prompt }]);
             const evaluation = aiResponse.trim().toUpperCase();
 
             if (evaluation.includes('SUCCESS')) {
-                console.log('[AgentEngine] Reflection: SUCCESS - proceeding to next step');
+                logger.info('[AgentEngine]', 'Reflection: SUCCESS - proceeding to next step');
                 await this.transitionTo('Executing');
             } else if (evaluation.includes('RETRY')) {
-                console.log('[AgentEngine] Reflection: RETRY - attempting to fix');
+                logger.info('[AgentEngine]', 'Reflection: RETRY - attempting to fix');
                 step.status = 'failed';
                 this.notifyPlanChange();
                 await this.transitionTo('Fixing');
             } else if (evaluation.includes('REPLAN')) {
-                console.log('[AgentEngine] Reflection: REPLAN - replanning required');
+                logger.info('[AgentEngine]', 'Reflection: REPLAN - replanning required');
                 const replanContext = `Previous step result: ${step.result}\nAI Evaluation: ${aiResponse}`;
                 this.plan = await this.planner.replan(this.plan, replanContext, streamChatCompletion);
                 this.notifyPlanChange();
                 await this.transitionTo('Executing');
             } else {
                 // 불명확한 응답은 일단 진행
-                console.warn('[AgentEngine] Reflection: Unclear response, proceeding anyway');
+                logger.warn('[AgentEngine]', 'Reflection: Unclear response, proceeding anyway');
                 await this.transitionTo('Executing');
             }
         } catch (error) {
-            console.error('[AgentEngine] Reflection failed:', error);
+            logger.error('[AgentEngine]', 'Reflection failed', error);
             await this.transitionTo('Executing');
         }
     }
@@ -429,37 +459,93 @@ ${stepContext}
         }
 
         this.fixAttempts.set(step.id, attemptCount + 1);
-        const errorContext = this.observer.formatDiagnostics(this.lastDiagnostics);
-        const prompt = `
-작업 중 다음과 같은 에러가 발생했습니다:
-${errorContext}
+        this.consecutiveMistakeCount++;
 
-이 에러를 수정하기 위한 JSON Action을 생성해주세요. 
-파일이 길 경우 반드시 **Search/Replace** 형식을 사용하여 필요한 부분만 수정하세요.
-형식: { "type": "write", "payload": { "path": "...", "content": "<<<<<<< SEARCH\\n...\\n=======\\n...\\n>>>>>>> REPLACE" } }
-**중요**: 
-- SEARCH와 REPLACE 내용이 동일하면 SEARCH/REPLACE 블록을 생성하지 마세요. 변경이 없으면 해당 작업을 생략하세요.
-- 기존 코드를 삭제하지 마세요. REPLACE가 빈 문자열이거나 SEARCH보다 훨씬 짧으면 거부됩니다. 사용자가 명시적으로 삭제를 요청한 경우에만 삭제하세요.
+        const errorContext = this.observer.formatDiagnostics(this.lastDiagnostics);
+        const stepResult = step.result || '(No result recorded)';
+
+        // 연속 실패 횟수에 따라 가이드 강도 조절 (Cline의 progressiveErrorMessage 패턴)
+        const mistakeWarning = this.consecutiveMistakeCount >= 3
+            ? `\n⚠️  ${this.consecutiveMistakeCount}번 연속 실패 중입니다. 지금까지와 다른 방법을 시도하세요. ` +
+              `이전에 시도한 방법과 동일한 코드를 제안하지 마세요.\n`
+            : this.consecutiveMistakeCount >= 2
+            ? `\n주의: ${this.consecutiveMistakeCount}번 연속으로 실패했습니다. 접근 방식을 다시 검토하세요.\n`
+            : '';
+
+        // 에러가 발생한 파일들의 현재 내용을 컨텍스트에 포함
+        const errorFiles = this.lastDiagnostics
+            .map(d => d.file)
+            .filter((f, i, arr) => arr.indexOf(f) === i); // 중복 제거
+        let fileContext = '';
+        for (const filePath of errorFiles.slice(0, 3)) { // 최대 3개 파일
+            try {
+                const content = await this.executor.readFile(filePath);
+                const preview = content.length > 2000 ? content.substring(0, 2000) + '\n... (truncated)' : content;
+                fileContext += `\n--- 현재 ${filePath} 내용 ---\n${preview}\n`;
+            } catch { /* 파일 읽기 실패는 무시 */ }
+        }
+
+        const prompt = `
+작업 중 에러가 발생했습니다. (시도 횟수: ${attemptCount + 1}/${this.context.maxFixAttempts})
+${mistakeWarning}
+**실패한 단계**: ${step.description}
+**실행 결과**: ${stepResult.substring(0, 500)}
+
+**발생한 에러**:
+${errorContext}
+${fileContext}
+이 에러를 수정하기 위한 JSON Action을 생성해주세요.
+기존 파일 수정 시 반드시 SEARCH/REPLACE 형식을 사용하세요 (파일 전체를 덮어쓰지 마세요):
+{ "type": "write", "payload": { "path": "...", "content": "<<<<<<< SEARCH\\n(원본 코드 일부)\\n=======\\n(수정된 코드)\\n>>>>>>> REPLACE" } }
+
+**중요 규칙**:
+- SEARCH 내용은 파일에 실제로 존재하는 코드여야 합니다
+- REPLACE가 빈 문자열이거나 SEARCH보다 70% 이상 짧으면 거부됩니다
+- 여러 파일 수정이 필요하면 multi_write를 사용하세요
 `;
 
         try {
-            let aiResponse = '';
-            const streamResult = streamChatCompletion([{ role: 'user', content: prompt }]);
-            for await (const chunk of streamResult.content) {
-                aiResponse += chunk;
-            }
-
-            const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-                const action = JSON.parse(jsonMatch[0]);
+            const aiResponse = await this.streamWithUI([{ role: 'user', content: prompt }]);
+            const jsonStr = extractJsonFromText(aiResponse);
+            if (jsonStr) {
+                const action = JSON.parse(jsonStr);
                 const result = await this.executor.execute(action);
-                step.result = `[Auto-Fix] ${result}`;
+                step.result = `[Auto-Fix attempt ${attemptCount + 1}] ${result}`;
+            } else {
+                logger.warn('[AgentEngine]', 'Fix response contained no valid JSON action');
             }
 
             await this.transitionTo('Observing');
         } catch (error) {
-            await this.transitionTo('Error');
+            const errMsg = error instanceof Error ? error.message : 'Unknown error';
+            logger.error('[AgentEngine]', `Fix attempt ${attemptCount + 1} failed: ${errMsg}`);
+            step.result = `[Fix failed] ${errMsg}`;
+            // 마지막 시도에서도 실패하면 에러 상태로 전환, 아니면 다시 Observing
+            if (attemptCount + 1 >= this.context.maxFixAttempts) {
+                await this.transitionTo('Error');
+            } else {
+                await this.transitionTo('Observing');
+            }
         }
+    }
+
+    /**
+     * AI 스트리밍 응답을 수집하면서 동시에 webview UI에 실시간 전달합니다.
+     * onStreamStart / onStreamChunk / onStreamEnd 콜백이 설정된 경우 webview로 전달됩니다.
+     * 모든 handlePlanning / handleExecution / handleReflection / handleFixing 에서 공통 사용.
+     */
+    private async streamWithUI(messages: ChatMessage[]): Promise<string> {
+        if (this.context.onStreamStart) this.context.onStreamStart();
+
+        let aiResponse = '';
+        const streamResult = streamChatCompletion(messages);
+        for await (const chunk of streamResult.content) {
+            aiResponse += chunk;
+            if (this.context.onStreamChunk) this.context.onStreamChunk(chunk);
+        }
+
+        if (this.context.onStreamEnd) this.context.onStreamEnd();
+        return aiResponse;
     }
 
     public updateContext(partialContext: Partial<AgentContext>): void {

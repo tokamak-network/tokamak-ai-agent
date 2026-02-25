@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import { logger } from '../utils/logger.js';
 
 export interface Checkpoint {
     id: string;
@@ -84,7 +85,7 @@ export class CheckpointManager {
                     }
                 } catch (error) {
                     // 파일 읽기 실패는 무시하고 계속 진행
-                    console.warn(`Failed to snapshot file: ${fileUri.fsPath}`, error);
+                    logger.warn('[CheckpointManager]', `Failed to snapshot file: ${fileUri.fsPath}`, error);
                 }
             }
 
@@ -103,10 +104,10 @@ export class CheckpointManager {
             // 디스크에 저장
             await this.saveCheckpoints();
 
-            console.log(`[CheckpointManager] Created checkpoint: ${checkpointId} (${files.length} files)`);
+            logger.info('[CheckpointManager]', `Created checkpoint: ${checkpointId} (${files.length} files)`);
             return checkpointId;
         } catch (error) {
-            console.error('[CheckpointManager] Failed to create checkpoint:', error);
+            logger.error('[CheckpointManager]', 'Failed to create checkpoint', error);
             throw error;
         }
     }
@@ -184,9 +185,9 @@ export class CheckpointManager {
                 throw new Error('Failed to apply workspace edit');
             }
 
-            console.log(`[CheckpointManager] Restored checkpoint: ${checkpointId}`);
+            logger.info('[CheckpointManager]', `Restored checkpoint: ${checkpointId}`);
         } catch (error) {
-            console.error('[CheckpointManager] Failed to restore checkpoint:', error);
+            logger.error('[CheckpointManager]', 'Failed to restore checkpoint', error);
             throw error;
         }
     }
@@ -325,7 +326,7 @@ export class CheckpointManager {
                 );
             }
         } catch (error) {
-            console.error('[CheckpointManager] Failed to save checkpoints:', error);
+            logger.error('[CheckpointManager]', 'Failed to save checkpoints', error);
         }
     }
 
@@ -358,14 +359,14 @@ export class CheckpointManager {
                         workspaceSnapshot,
                     });
                 } catch (error) {
-                    console.warn(`[CheckpointManager] Failed to load checkpoint ${meta.id}:`, error);
+                    logger.warn('[CheckpointManager]', `Failed to load checkpoint ${meta.id}`, error);
                 }
             }
 
             // 타임스탬프 순으로 정렬 (최신순)
             this.checkpoints.sort((a, b) => b.timestamp - a.timestamp);
 
-            console.log(`[CheckpointManager] Loaded ${this.checkpoints.length} checkpoints`);
+            logger.info('[CheckpointManager]', `Loaded ${this.checkpoints.length} checkpoints`);
         } catch (error) {
             // 파일이 없으면 빈 배열로 시작
             this.checkpoints = [];

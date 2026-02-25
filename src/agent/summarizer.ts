@@ -1,4 +1,5 @@
 import { streamChatCompletion } from '../api/client.js';
+import { logger } from '../utils/logger.js';
 
 export class Summarizer {
     /**
@@ -23,7 +24,7 @@ ${content.slice(0, 4000)} // 상위 일부만 사용하여 요약 요청 (토큰
             }
             return summary.trim();
         } catch (error) {
-            console.error(`[Summarizer] Failed to summarize ${path}:`, error);
+            logger.error('[Summarizer]', `Failed to summarize ${path}`, error);
             return `(Summary failed for ${path})`;
         }
     }
