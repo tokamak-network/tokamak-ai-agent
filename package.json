@@ -138,17 +138,20 @@
     "lint": "eslint src --ext ts",
     "bundle": "rm -rf out && esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
     "bundle-watch": "npm run bundle -- --watch",
-    "package": "npm run bundle && vsce package"
+    "package": "npm run bundle && vsce package",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.13.0",
     "@typescript-eslint/parser": "^6.13.0",
+    "@vitest/coverage-v8": "^2.1.9",
     "@vscode/vsce": "^2.22.0",
     "esbuild": "^0.27.3",
     "eslint": "^8.54.0",
-    "typescript": "^5.3.0"
+    "typescript": "^5.3.0",
+    "vitest": "^2.1.9"
   },
   "dependencies": {
     "openai": "^4.24.0"
