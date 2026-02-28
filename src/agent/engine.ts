@@ -11,11 +11,12 @@ import { CheckpointManager, Checkpoint } from './checkpointManager.js';
 import { streamChatCompletion, ChatMessage } from '../api/client.js';
 import { isCheckpointsEnabled, getSettings as getConfigSettings } from '../config/settings.js';
 import {
-    getReviewerSystemPrompt, getCriticSystemPrompt,
-    getReviewCritiquePrompt, getReviewRebuttalPrompt,
-    getDebateChallengePrompt, getDebateDefensePrompt,
-    getReviewSynthesisPrompt, getDebateSynthesisPrompt,
-} from '../chat/systemPromptBuilder.js';
+    buildReviewCritiquePrompt, buildReviewRebuttalPrompt,
+    buildDebateChallengePrompt, buildDebateDefensePrompt,
+    buildReviewSynthesisPrompt, buildDebateSynthesisPrompt,
+    buildAgentEngineSystemPrompt, resolveHints,
+} from '../prompts/index.js';
+import type { PromptHints } from '../prompts/index.js';
 import { logger } from '../utils/logger.js';
 import { stripThinkingBlocks } from '../utils/contentUtils.js';
 
@@ -700,7 +701,7 @@ ${fileContext}${searchReplaceHint}
                 const response = await this.streamWithUI(
                     [{ role: 'user', content: critiquePrompt }],
                     this.context.reviewerModel,
-                    getReviewCritiquePrompt(strategy)
+                    buildReviewCritiquePrompt(strategy, this.getHintsForModel(this.context.reviewerModel))
                 );
 
                 this.reviewSession.rounds.push({
@@ -715,7 +716,7 @@ ${fileContext}${searchReplaceHint}
                 const response = await this.streamWithUI(
                     [{ role: 'user', content: rebuttalPrompt }],
                     undefined,
-                    getReviewRebuttalPrompt(strategy)
+                    buildReviewRebuttalPrompt(strategy, this.getHintsForModel())
                 );
 
                 this.reviewSession.rounds.push({
@@ -795,22 +796,22 @@ ${fileContext}${searchReplaceHint}
 
                 if (roundNumber === 1) {
                     role = 'risk-analysis';
-                    systemPrompt = getDebateChallengePrompt('perspectives');
                     overrideModel = this.context.criticModel;
+                    systemPrompt = buildDebateChallengePrompt('perspectives', this.getHintsForModel(overrideModel));
                     if (this.context.onMessage) {
                         this.context.onMessage('assistant', `🔴 **Risk Analysis** (round ${roundNumber}/${maxIter})...`);
                     }
                 } else if (roundNumber === 2) {
                     role = 'innovation-analysis';
-                    systemPrompt = getDebateChallengePrompt('perspectives');
                     overrideModel = undefined; // default model
+                    systemPrompt = buildDebateChallengePrompt('perspectives', this.getHintsForModel(overrideModel));
                     if (this.context.onMessage) {
                         this.context.onMessage('assistant', `🟢 **Innovation Analysis** (round ${roundNumber}/${maxIter})...`);
                     }
                 } else {
                     role = 'cross-review';
-                    systemPrompt = getDebateDefensePrompt('perspectives');
                     overrideModel = this.context.criticModel;
+                    systemPrompt = buildDebateDefensePrompt('perspectives', this.getHintsForModel(overrideModel));
                     if (this.context.onMessage) {
                         this.context.onMessage('assistant', `🔄 **Cross-Review** (round ${roundNumber}/${maxIter})...`);
                     }
@@ -839,7 +840,7 @@ ${fileContext}${searchReplaceHint}
                     const response = await this.streamWithUI(
                         [{ role: 'user', content: challengePrompt }],
                         this.context.criticModel,
-                        getDebateChallengePrompt('debate')
+                        buildDebateChallengePrompt('debate', this.getHintsForModel(this.context.criticModel))
                     );
 
                     this.debateSession.rounds.push({ round: roundNumber, role: 'challenge', content: response });
@@ -853,7 +854,7 @@ ${fileContext}${searchReplaceHint}
                     const response = await this.streamWithUI(
                         [{ role: 'user', content: defensePrompt }],
                         undefined,
-                        getDebateDefensePrompt('debate')
+                        buildDebateDefensePrompt('debate', this.getHintsForModel())
                     );
 
                     this.debateSession.rounds.push({ round: roundNumber, role: 'defense', content: response });
@@ -915,7 +916,8 @@ ${fileContext}${searchReplaceHint}
                 .join('\n\n---\n\n');
 
             const synthesisPrompt = `Here are the discussion rounds to synthesize:\n\n${roundsSummary}\n\nPlease provide a comprehensive synthesis.`;
-            const systemPrompt = isReview ? getReviewSynthesisPrompt() : getDebateSynthesisPrompt();
+            const synthesisHints = this.getHintsForModel();
+            const systemPrompt = isReview ? buildReviewSynthesisPrompt(synthesisHints) : buildDebateSynthesisPrompt(synthesisHints);
 
             const synthesisResponse = await this.streamWithUI(
                 [{ role: 'user', content: synthesisPrompt }],
@@ -1116,31 +1118,15 @@ ${fileContext}${searchReplaceHint}
         return null;
     }
 
+    /** 모델에 대한 PromptHints를 반환합니다. */
+    private getHintsForModel(model?: string): PromptHints {
+        return resolveHints(model || this.context.reviewerModel || 'default');
+    }
+
     /** 에이전트 역할, 도구 사용 규칙, 코드 품질 기준을 AI에게 지정하는 System Prompt */
-    private static readonly SYSTEM_PROMPT = `You are an expert AI coding agent integrated into a VS Code extension. Your role is to autonomously plan and execute software engineering tasks by writing, reading, and modifying files.
-
-## CRITICAL RESTRICTIONS (read first)
-- **NO tool calls**: Do NOT output [TOOL_CALL], <tool_call>, or any native function-calling blocks. You have no external tools.
-- **NO shell commands for exploration**: Do not try to run ls, cat, or other commands to explore the project. The context you need is already provided.
-- **Planning mode**: When asked to make a plan, output ONLY a markdown checklist (- [ ] ...). Nothing else.
-- **Action mode**: When asked for an action, output ONLY a JSON object. Nothing else.
-
-## Core Rules
-1. **SEARCH/REPLACE format**: When modifying existing files, ALWAYS use the SEARCH/REPLACE format. NEVER overwrite the entire file unless explicitly creating a brand-new file.
-   The delimiters must be EXACTLY as shown (7 < characters, 7 = characters, 7 > characters):
-   <<<<<<< SEARCH
-   (exact lines copied from the original file — must match precisely)
-   =======
-   (new replacement lines)
-   >>>>>>> REPLACE
-
-2. **JSON output for actions**: Output ONLY valid JSON (optionally wrapped in a \`\`\`json block). No explanation text outside the JSON.
-   When the SEARCH/REPLACE content is inside a JSON string, escape newlines as \\n:
-   { "type": "write", "payload": { "path": "src/foo.ts", "content": "<<<<<<< SEARCH\\nold line\\n=======\\nnew line\\n>>>>>>> REPLACE" } }
-
-3. **Minimal changes**: Only modify what is strictly necessary. Do not reformat unrelated code.
-4. **Correctness first**: Ensure all imports, types, and references are valid before finalizing.
-5. **Language**: Respond in the same language as the user's request.`;
+    private getSystemPrompt(): string {
+        return buildAgentEngineSystemPrompt(this.getHintsForModel());
+    }
 
     /**
      * AI 스트리밍 응답을 수집하면서 동시에 webview UI에 실시간 전달합니다.
@@ -1157,7 +1143,7 @@ ${fileContext}${searchReplaceHint}
     ): Promise<string> {
         if (this.context.onStreamStart) this.context.onStreamStart();
 
-        const systemContent = overrideSystemPrompt ?? AgentEngine.SYSTEM_PROMPT;
+        const systemContent = overrideSystemPrompt ?? this.getSystemPrompt();
         const systemMessage: ChatMessage = { role: 'system', content: systemContent };
         const fullMessages = [systemMessage, ...messages];
 

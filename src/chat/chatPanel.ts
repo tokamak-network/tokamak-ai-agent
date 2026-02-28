@@ -11,7 +11,7 @@ import {
 } from '../utils/contentUtils.js';
 import { logger } from '../utils/logger.js';
 import { FileOperation, parseFileOperations } from './fileOperationParser.js';
-import { ChatMode, getSystemPromptForMode } from './systemPromptBuilder.js';
+import { ChatMode, buildModePrompt, resolveHints, PromptContext } from '../prompts/index.js';
 import { SlashCommand, getAllSkills, filterSlashCommands, matchSlashCommand } from './skillsManager.js';
 import { getHtmlContent } from './webviewContent.js';
 
@@ -1737,14 +1737,17 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             const maxLoops = 10;
             let needsMoreContext = true;
 
+            const hints = resolveHints(getSelectedModel());
+            const ctx: PromptContext = {
+                workspaceInfo: this.getWorkspaceInfo(),
+                projectStructure: await this.getProjectStructure(),
+                projectKnowledge: await this.getProjectKnowledge(),
+                variant: hints.variant,
+                hints,
+            };
             const systemMessage: ChatMessage = {
                 role: 'system',
-                content: getSystemPromptForMode(
-                    this.currentMode,
-                    this.getWorkspaceInfo(),
-                    await this.getProjectStructure(),
-                    await this.getProjectKnowledge(),
-                ),
+                content: buildModePrompt(this.currentMode, ctx),
             };
 
             while (needsMoreContext && loopCount < maxLoops) {
