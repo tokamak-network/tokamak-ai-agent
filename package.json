@@ -96,6 +96,18 @@
           "type": "number",
           "default": 2,
           "description": "Maximum plan debate rounds in Plan mode"
+        },
+        "tokamak.agentStrategy": {
+          "type": "string",
+          "enum": ["review", "red-team"],
+          "default": "review",
+          "description": "Strategy for multi-model code review in Agent mode. 'review' uses structured critique/rebuttal, 'red-team' uses adversarial security analysis."
+        },
+        "tokamak.planStrategy": {
+          "type": "string",
+          "enum": ["debate", "perspectives"],
+          "default": "debate",
+          "description": "Strategy for multi-model plan debate. 'debate' uses structured challenge/defense, 'perspectives' uses risk/innovation lens analysis."
         }
       }
     },

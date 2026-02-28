@@ -3,6 +3,8 @@ import * as vscode from 'vscode';
 /** Fixed API endpoint (not user-configurable). */
 export const TOKAMAK_API_BASE_URL = 'https://api.ai.tokamak.network';
 
+import type { AgentStrategy, PlanStrategy } from '../agent/types.js';
+
 export interface TokamakSettings {
     apiKey: string;
     baseUrl: string;
@@ -16,6 +18,8 @@ export interface TokamakSettings {
     criticModel: string;
     maxReviewIterations: number;
     maxDebateIterations: number;
+    agentStrategy: AgentStrategy;
+    planStrategy: PlanStrategy;
 }
 
 export function setSettingsContext(context: vscode.ExtensionContext): void {
@@ -41,6 +45,8 @@ export function getSettings(): TokamakSettings {
         criticModel: config.get<string>('criticModel', ''),
         maxReviewIterations: config.get<number>('maxReviewIterations', 3),
         maxDebateIterations: config.get<number>('maxDebateIterations', 2),
+        agentStrategy: config.get<AgentStrategy>('agentStrategy', 'review'),
+        planStrategy: config.get<PlanStrategy>('planStrategy', 'debate'),
     };
 }
 
@@ -86,6 +92,22 @@ export function getMaxReviewIterations(): number {
 
 export function getMaxDebateIterations(): number {
     return getSettings().maxDebateIterations;
+}
+
+export function getAgentStrategy(): AgentStrategy {
+    return getSettings().agentStrategy;
+}
+
+export async function setAgentStrategy(strategy: AgentStrategy): Promise<void> {
+    await vscode.workspace.getConfiguration('tokamak').update('agentStrategy', strategy, true);
+}
+
+export function getPlanStrategy(): PlanStrategy {
+    return getSettings().planStrategy;
+}
+
+export async function setPlanStrategy(strategy: PlanStrategy): Promise<void> {
+    await vscode.workspace.getConfiguration('tokamak').update('planStrategy', strategy, true);
 }
 
 export function isConfigured(): boolean {

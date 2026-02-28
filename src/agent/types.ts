@@ -10,8 +10,41 @@ export type AgentState =
     | 'Fixing'
     | 'Reviewing'
     | 'Debating'
+    | 'WaitingForReviewDecision'
+    | 'WaitingForDebateDecision'
+    | 'Synthesizing'
     | 'Done'
     | 'Error';
+
+export type AgentStrategy = 'review' | 'red-team';
+export type PlanStrategy = 'debate' | 'perspectives';
+
+export interface ConvergenceMetrics {
+    agreementRatio: number;
+    avgStability: number;
+    overallScore: number;
+    recommendation: 'continue' | 'converged' | 'stalled';
+}
+
+export interface DiscussionRound {
+    round: number;
+    role: 'critique' | 'rebuttal' | 'challenge' | 'defense' | 'risk-analysis' | 'innovation-analysis' | 'cross-review';
+    content: string;
+}
+
+export interface ReviewSessionState {
+    strategy: AgentStrategy;
+    rounds: DiscussionRound[];
+    convergence: ConvergenceMetrics | null;
+    synthesisResult: string | null;
+}
+
+export interface DebateSessionState {
+    strategy: PlanStrategy;
+    rounds: DiscussionRound[];
+    convergence: ConvergenceMetrics | null;
+    synthesisResult: string | null;
+}
 
 export type StepStatus = 'pending' | 'running' | 'done' | 'failed';
 
@@ -49,18 +82,36 @@ export interface AgentContext {
     criticModel?: string;
     maxReviewIterations?: number;
     maxDebateIterations?: number;
+    /** Strategy selection */
+    agentStrategy?: AgentStrategy;
+    planStrategy?: PlanStrategy;
+    /** Multi-model review callbacks */
+    onReviewComplete?: (feedback: ReviewFeedback, rounds: DiscussionRound[], convergence: ConvergenceMetrics | null) => void;
+    onDebateComplete?: (feedback: DebateFeedback, rounds: DiscussionRound[], convergence: ConvergenceMetrics | null) => void;
+    onSynthesisComplete?: (synthesis: string) => void;
+    /** Promise resolvers for user decision */
+    reviewDecisionResolver?: ((decision: 'apply_fix' | 'skip') => void) | null;
+    debateDecisionResolver?: ((decision: 'revise' | 'accept') => void) | null;
 }
 
 export interface ReviewFeedback {
     verdict: 'PASS' | 'NEEDS_FIX';
     summary: string;
     issues: { severity: 'critical' | 'major' | 'minor'; description: string; suggestion?: string }[];
+    pointsOfAgreement?: string[];
+    pointsOfDisagreement?: { claim: string; explanation: string; alternative: string }[];
+    unexaminedAssumptions?: string[];
+    missingConsiderations?: string[];
 }
 
 export interface DebateFeedback {
     verdict: 'APPROVE' | 'CHALLENGE';
     concerns: string[];
     suggestions: string[];
+    securityRisks?: { description: string; severity: string }[];
+    edgeCases?: string[];
+    scalabilityConcerns?: string[];
+    maintenanceBurden?: string[];
 }
 
 export interface AgentAction {

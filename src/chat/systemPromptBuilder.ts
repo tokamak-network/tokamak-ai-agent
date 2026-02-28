@@ -150,3 +150,240 @@ Rules:
 - If the plan is solid, return verdict "APPROVE" with empty arrays
 - Respond with ONLY the JSON object, no additional text`;
 }
+
+// ─── Structured Prompts for Multi-Round Review ───────────────────────────
+
+export function getReviewCritiquePrompt(strategy: 'review' | 'red-team'): string {
+    if (strategy === 'red-team') {
+        return `You are a security-focused red-team reviewer. Analyze the code changes with adversarial thinking.
+
+Your response MUST include these sections as markdown, followed by a JSON verdict block:
+
+## Security Risks
+List each risk with severity (CRITICAL/MAJOR/MINOR):
+- [SEVERITY] Description
+
+## Edge Cases
+- Unhandled edge cases that could cause failures
+
+## Scalability Concerns
+- Performance or scaling issues
+
+## Maintenance Burden
+- Long-term maintenance concerns
+
+## Missing Requirements
+- Requirements not addressed by this code
+
+## Issue Summary
+Total: X issues (Y CRITICAL, Z MAJOR, W MINOR)
+
+---
+JSON verdict (MUST be last):
+{ "verdict": "PASS" | "NEEDS_FIX", "summary": "...", "issues": [{ "severity": "critical"|"major"|"minor", "description": "...", "suggestion": "..." }] }`;
+    }
+
+    return `You are a senior code reviewer engaged in a structured review dialogue.
+
+Your response MUST include these sections as markdown, followed by a JSON verdict block:
+
+## Points of Agreement
+- Aspects of the code that are well-implemented
+
+## Points of Disagreement
+For each disagreement:
+- **Claim**: What you disagree with
+- **Explanation**: Why it's problematic
+- **Alternative**: Suggested approach
+
+## Unexamined Assumptions
+- Assumptions the code makes that haven't been validated
+
+## Missing Considerations
+- Important aspects not addressed
+
+---
+JSON verdict (MUST be last):
+{ "verdict": "PASS" | "NEEDS_FIX", "summary": "...", "issues": [{ "severity": "critical"|"major"|"minor", "description": "...", "suggestion": "..." }], "pointsOfAgreement": [...], "pointsOfDisagreement": [{ "claim": "...", "explanation": "...", "alternative": "..." }], "unexaminedAssumptions": [...], "missingConsiderations": [...] }`;
+}
+
+export function getReviewRebuttalPrompt(strategy: 'review' | 'red-team'): string {
+    if (strategy === 'red-team') {
+        return `You are the original code author responding to a red-team security review.
+
+Your response MUST include these sections as markdown, followed by a JSON block:
+
+## Accepted Challenges
+- Challenges you accept as valid, with planned fixes
+
+## Rejected Challenges
+For each rejection:
+- **Challenge**: The original concern
+- **Defense**: Why it's not applicable or already handled
+
+## Revised Solution
+- Summary of changes you would make based on accepted challenges
+
+---
+JSON (MUST be last):
+{ "verdict": "PASS" | "NEEDS_FIX", "summary": "...", "issues": [{ "severity": "critical"|"major"|"minor", "description": "...", "suggestion": "..." }] }`;
+    }
+
+    return `You are the original code author responding to a structured code review.
+
+Your response MUST include these sections as markdown, followed by a JSON block:
+
+## Conceded Points
+- Review points you accept as valid
+
+## Defended Points
+For each defense:
+- **Original Critique**: What was criticized
+- **Defense**: Why the current approach is correct or preferred
+- **Evidence**: Supporting reasoning
+
+## Refined Recommendation
+- Updated assessment considering both perspectives
+
+---
+JSON (MUST be last):
+{ "verdict": "PASS" | "NEEDS_FIX", "summary": "...", "issues": [{ "severity": "critical"|"major"|"minor", "description": "...", "suggestion": "..." }] }`;
+}
+
+// ─── Structured Prompts for Multi-Round Debate ───────────────────────────
+
+export function getDebateChallengePrompt(strategy: 'debate' | 'perspectives'): string {
+    if (strategy === 'perspectives') {
+        return `You are analyzing this plan from a specific analytical lens.
+
+**If assigned "risk-analysis" role**: Focus on risks, failure modes, security concerns, and worst-case scenarios.
+**If assigned "innovation-analysis" role**: Focus on opportunities, novel approaches, potential improvements, and best-case outcomes.
+
+Your response MUST include:
+
+## Analysis (from your assigned lens)
+- Key observations from your perspective
+
+## Recommendations
+- Concrete suggestions aligned with your lens
+
+## Confidence Assessment
+- How confident are you in this plan's success (from your lens)?
+
+---
+JSON (MUST be last):
+{ "verdict": "APPROVE" | "CHALLENGE", "concerns": [...], "suggestions": [...] }`;
+    }
+
+    return `You are a software architecture critic engaged in a structured debate about a development plan.
+
+Your response MUST include these sections as markdown, followed by a JSON block:
+
+## Structural Concerns
+- Issues with the plan's architecture or organization
+
+## Missing Steps
+- Steps that should be added
+
+## Risk Assessment
+- Potential risks and their likelihood
+
+## Alternative Approaches
+- Different ways to achieve the same goal
+
+---
+JSON (MUST be last):
+{ "verdict": "APPROVE" | "CHALLENGE", "concerns": [...], "suggestions": [...] }`;
+}
+
+export function getDebateDefensePrompt(strategy: 'debate' | 'perspectives'): string {
+    if (strategy === 'perspectives') {
+        return `You are performing a cross-review of analyses from different perspectives (risk vs. innovation).
+
+Your response MUST include:
+
+## Cross-Review Summary
+- Where the risk analysis and innovation analysis agree
+- Where they diverge
+
+## Balanced Recommendation
+- A recommendation that incorporates both perspectives
+
+## Remaining Risks
+- Risks that still need mitigation
+
+---
+JSON (MUST be last):
+{ "verdict": "APPROVE" | "CHALLENGE", "concerns": [...], "suggestions": [...] }`;
+    }
+
+    return `You are the original plan author responding to a structured critique.
+
+Your response MUST include these sections as markdown, followed by a JSON block:
+
+## Conceded Points
+- Critique points you accept
+
+## Defended Points
+For each defense:
+- **Critique**: The original concern
+- **Defense**: Why the current plan handles this
+- **Evidence**: Supporting reasoning
+
+## Revised Plan
+- Summary of adjustments based on valid concerns
+
+---
+JSON (MUST be last):
+{ "verdict": "APPROVE" | "CHALLENGE", "concerns": [...], "suggestions": [...] }`;
+}
+
+// ─── Synthesis Prompts ───────────────────────────────────────────────────
+
+export function getReviewSynthesisPrompt(): string {
+    return `You are synthesizing the results of a multi-round code review dialogue.
+
+Given the discussion rounds below, produce a comprehensive synthesis.
+
+Your response MUST include:
+
+## Consensus
+- Points both reviewer and author agree on
+
+## Resolved Issues
+- Issues raised and successfully addressed during the dialogue
+
+## Remaining Concerns
+- Unresolved issues that still need attention
+
+## Final Recommendation
+- Overall assessment and recommended next steps
+
+---
+JSON summary (MUST be last):
+{ "verdict": "PASS" | "NEEDS_FIX", "summary": "final synthesis summary", "resolvedCount": N, "remainingCount": N }`;
+}
+
+export function getDebateSynthesisPrompt(): string {
+    return `You are synthesizing the results of a multi-round plan debate.
+
+Given the discussion rounds below, produce a comprehensive synthesis.
+
+Your response MUST include:
+
+## Consensus Points
+- Areas where all participants agree
+
+## Key Divergences
+- Areas where disagreement remains
+
+## Convergence Assessment
+- How close the discussion came to agreement
+
+## Recommended Plan Adjustments
+- Specific changes to the plan based on the debate
+
+---
+JSON summary (MUST be last):
+{ "verdict": "APPROVE" | "CHALLENGE", "summary": "final synthesis summary", "consensusCount": N, "divergenceCount": N }`;
+}

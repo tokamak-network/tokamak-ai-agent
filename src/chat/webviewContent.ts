@@ -870,6 +870,113 @@ export function getHtmlContent(): string {
             font-family: inherit;
             font-size: 0.85em;
         }
+        /* Strategy select dropdown */
+        .strategy-row {
+            display: none;
+            align-items: center;
+            gap: 6px;
+            padding: 0 15px 4px;
+            font-size: 0.82em;
+        }
+        .strategy-row.visible {
+            display: flex;
+        }
+        .strategy-row label {
+            opacity: 0.7;
+            white-space: nowrap;
+        }
+        .strategy-row select {
+            padding: 2px 6px;
+            border: 1px solid var(--vscode-input-border);
+            background-color: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border-radius: 4px;
+            font-family: inherit;
+            font-size: 0.85em;
+        }
+        /* Review/Debate Results Panels */
+        #review-results-panel, #debate-results-panel {
+            display: none;
+            padding: 12px 15px;
+            background-color: var(--vscode-notifications-background);
+            border-top: 1px solid var(--vscode-widget-border);
+        }
+        #review-results-panel.visible, #debate-results-panel.visible {
+            display: block;
+        }
+        #review-results-panel h4, #debate-results-panel h4 {
+            margin: 0 0 8px 0;
+            font-size: 0.9em;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .convergence-badge {
+            font-size: 0.75em;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-weight: bold;
+        }
+        .convergence-badge.converged {
+            background-color: #16a34a;
+            color: #fff;
+        }
+        .convergence-badge.stalled {
+            background-color: #dc2626;
+            color: #fff;
+        }
+        .convergence-badge.continue {
+            background-color: #2563eb;
+            color: #fff;
+        }
+        .round-item {
+            margin-bottom: 8px;
+            padding: 6px 10px;
+            border-left: 3px solid var(--vscode-input-border);
+            font-size: 0.85em;
+        }
+        .round-item .round-header {
+            font-weight: bold;
+            margin-bottom: 4px;
+            opacity: 0.9;
+        }
+        .round-item .round-content {
+            white-space: pre-wrap;
+            opacity: 0.8;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .synthesis-block {
+            margin-top: 8px;
+            padding: 8px 10px;
+            border: 1px solid var(--vscode-input-border);
+            border-radius: 4px;
+            font-size: 0.85em;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .result-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .result-actions button {
+            padding: 4px 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 0.85em;
+        }
+        .result-actions .btn-primary {
+            background-color: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+        }
+        .result-actions .btn-secondary {
+            background-color: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-button-secondaryForeground);
+        }
     </style>
 </head>
 <body>
@@ -911,6 +1018,18 @@ export function getHtmlContent(): string {
                 <select id="critic-model-select"></select>
             </div>
         </div>
+        <div class="strategy-row" id="strategy-row">
+            <label for="agent-strategy-select">Agent:</label>
+            <select id="agent-strategy-select">
+                <option value="review">Review</option>
+                <option value="red-team">Red-Team</option>
+            </select>
+            <label for="plan-strategy-select">Plan:</label>
+            <select id="plan-strategy-select">
+                <option value="debate">Debate</option>
+                <option value="perspectives">Perspectives</option>
+            </select>
+        </div>
         <div id="mode-tabs">
             <button class="mode-tab active" data-mode="ask">💬 Ask</button>
             <button class="mode-tab" data-mode="plan">📋 Plan</button>
@@ -940,6 +1059,24 @@ export function getHtmlContent(): string {
         <div id="operations-buttons">
             <button id="apply-btn">✓ Apply Changes</button>
             <button id="reject-btn">✗ Reject</button>
+        </div>
+    </div>
+    <div id="review-results-panel">
+        <h4>🔍 Review Results <span class="convergence-badge" id="review-convergence-badge"></span></h4>
+        <div id="review-rounds-list"></div>
+        <div class="synthesis-block" id="review-synthesis" style="display:none;"></div>
+        <div class="result-actions">
+            <button class="btn-primary" id="apply-fix-btn">Apply Fix</button>
+            <button class="btn-secondary" id="skip-review-btn">Skip & Continue</button>
+        </div>
+    </div>
+    <div id="debate-results-panel">
+        <h4>💬 Debate Results <span class="convergence-badge" id="debate-convergence-badge"></span></h4>
+        <div id="debate-rounds-list"></div>
+        <div class="synthesis-block" id="debate-synthesis" style="display:none;"></div>
+        <div class="result-actions">
+            <button class="btn-primary" id="revise-plan-btn">Revise Plan</button>
+            <button class="btn-secondary" id="accept-plan-btn">Accept as-is</button>
         </div>
     </div>
     <div id="token-usage-bar">
@@ -1005,6 +1142,21 @@ export function getHtmlContent(): string {
             const criticSelectContainer = document.getElementById('critic-select-container');
             const reviewerModelSelect = document.getElementById('reviewer-model-select');
             const criticModelSelect = document.getElementById('critic-model-select');
+            const strategyRow = document.getElementById('strategy-row');
+            const agentStrategySelect = document.getElementById('agent-strategy-select');
+            const planStrategySelect = document.getElementById('plan-strategy-select');
+            const reviewResultsPanel = document.getElementById('review-results-panel');
+            const reviewRoundsList = document.getElementById('review-rounds-list');
+            const reviewSynthesisBlock = document.getElementById('review-synthesis');
+            const reviewConvergenceBadge = document.getElementById('review-convergence-badge');
+            const applyFixBtn = document.getElementById('apply-fix-btn');
+            const skipReviewBtn = document.getElementById('skip-review-btn');
+            const debateResultsPanel = document.getElementById('debate-results-panel');
+            const debateRoundsList = document.getElementById('debate-rounds-list');
+            const debateSynthesisBlock = document.getElementById('debate-synthesis');
+            const debateConvergenceBadge = document.getElementById('debate-convergence-badge');
+            const revisePlanBtn = document.getElementById('revise-plan-btn');
+            const acceptPlanBtn = document.getElementById('accept-plan-btn');
             let multiModelEnabled = false;
 
             let currentStreamingMessage = null;
@@ -1553,6 +1705,34 @@ export function getHtmlContent(): string {
             vscode.postMessage({ command: 'selectCriticModel', model: criticModelSelect.value });
             });
 
+            agentStrategySelect.addEventListener('change', () => {
+            vscode.postMessage({ command: 'selectAgentStrategy', strategy: agentStrategySelect.value });
+            });
+
+            planStrategySelect.addEventListener('change', () => {
+            vscode.postMessage({ command: 'selectPlanStrategy', strategy: planStrategySelect.value });
+            });
+
+            applyFixBtn.addEventListener('click', () => {
+            vscode.postMessage({ command: 'reviewAction', decision: 'apply_fix' });
+            reviewResultsPanel.classList.remove('visible');
+            });
+
+            skipReviewBtn.addEventListener('click', () => {
+            vscode.postMessage({ command: 'reviewAction', decision: 'skip' });
+            reviewResultsPanel.classList.remove('visible');
+            });
+
+            revisePlanBtn.addEventListener('click', () => {
+            vscode.postMessage({ command: 'debateAction', decision: 'revise' });
+            debateResultsPanel.classList.remove('visible');
+            });
+
+            acceptPlanBtn.addEventListener('click', () => {
+            vscode.postMessage({ command: 'debateAction', decision: 'accept' });
+            debateResultsPanel.classList.remove('visible');
+            });
+
             function updateRoleModelVisibility() {
             if (multiModelEnabled && (currentMode === 'agent')) {
             reviewerSelectContainer.classList.add('visible');
@@ -1563,6 +1743,12 @@ export function getHtmlContent(): string {
             criticSelectContainer.classList.add('visible');
             } else {
             criticSelectContainer.classList.remove('visible');
+            }
+            // Show/hide strategy row when multi-model is enabled
+            if (multiModelEnabled) {
+            strategyRow.classList.add('visible');
+            } else {
+            strategyRow.classList.remove('visible');
             }
             }
 
@@ -1768,6 +1954,28 @@ export function getHtmlContent(): string {
             case 'generationStopped':
             endStreaming();
             break;
+            case 'showReviewResults':
+            renderRoundsList(message.rounds || [], reviewRoundsList);
+            renderConvergenceBadge(reviewConvergenceBadge, message.convergence);
+            reviewSynthesisBlock.style.display = 'none';
+            reviewResultsPanel.classList.add('visible');
+            break;
+            case 'showDebateResults':
+            renderRoundsList(message.rounds || [], debateRoundsList);
+            renderConvergenceBadge(debateConvergenceBadge, message.convergence);
+            debateSynthesisBlock.style.display = 'none';
+            debateResultsPanel.classList.add('visible');
+            break;
+            case 'showSynthesis':
+            // Determine which panel is active and show synthesis there
+            if (reviewResultsPanel.classList.contains('visible')) {
+                reviewSynthesisBlock.textContent = message.synthesis || '';
+                reviewSynthesisBlock.style.display = 'block';
+            } else if (debateResultsPanel.classList.contains('visible')) {
+                debateSynthesisBlock.textContent = message.synthesis || '';
+                debateSynthesisBlock.style.display = 'block';
+            }
+            break;
             }
             });
 
@@ -1780,6 +1988,13 @@ export function getHtmlContent(): string {
             } else if (state === 'Debating') {
             agentStatusBadge.style.backgroundColor = '#d97706';
             agentStatusBadge.style.color = '#fff';
+            } else if (state === 'WaitingForReviewDecision' || state === 'WaitingForDebateDecision') {
+            agentStatusBadge.textContent = 'Awaiting Decision';
+            agentStatusBadge.style.backgroundColor = '#2563eb';
+            agentStatusBadge.style.color = '#fff';
+            } else if (state === 'Synthesizing') {
+            agentStatusBadge.style.backgroundColor = '#0891b2';
+            agentStatusBadge.style.color = '#fff';
             } else {
             agentStatusBadge.style.backgroundColor = '';
             agentStatusBadge.style.color = '';
@@ -1790,6 +2005,35 @@ export function getHtmlContent(): string {
             } else if (currentMode !== 'plan') {
             planPanel.classList.remove('visible');
             }
+            }
+
+            function renderRoundsList(rounds, container) {
+            container.innerHTML = '';
+            rounds.forEach(function(r) {
+                const item = document.createElement('div');
+                item.className = 'round-item';
+                const header = document.createElement('div');
+                header.className = 'round-header';
+                header.textContent = 'Round ' + r.round + ' — ' + r.role;
+                const content = document.createElement('div');
+                content.className = 'round-content';
+                // Truncate long content for display
+                const displayContent = r.content.length > 500 ? r.content.substring(0, 500) + '...' : r.content;
+                content.textContent = displayContent;
+                item.appendChild(header);
+                item.appendChild(content);
+                container.appendChild(item);
+            });
+            }
+
+            function renderConvergenceBadge(badge, convergence) {
+            if (!convergence) {
+                badge.textContent = '';
+                badge.className = 'convergence-badge';
+                return;
+            }
+            badge.textContent = 'Convergence: ' + convergence.overallScore.toFixed(2) + ' (' + convergence.recommendation + ')';
+            badge.className = 'convergence-badge ' + convergence.recommendation;
             }
 
             function updateCheckpointsUI(checkpoints) {

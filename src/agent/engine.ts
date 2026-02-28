@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import { AgentState, AgentContext, PlanStep, ReviewFeedback, DebateFeedback } from './types.js';
+import { AgentState, AgentContext, PlanStep, ReviewFeedback, DebateFeedback, ReviewSessionState, DebateSessionState, DiscussionRound } from './types.js';
+import { computeConvergence } from './convergence.js';
 import { Planner } from './planner.js';
 import { Executor } from './executor.js';
 import { Observer, DiagnosticInfo } from './observer.js';
@@ -9,7 +10,12 @@ import { DependencyAnalyzer } from './dependencyAnalyzer.js';
 import { CheckpointManager, Checkpoint } from './checkpointManager.js';
 import { streamChatCompletion, ChatMessage } from '../api/client.js';
 import { isCheckpointsEnabled, getSettings as getConfigSettings } from '../config/settings.js';
-import { getReviewerSystemPrompt, getCriticSystemPrompt } from '../chat/systemPromptBuilder.js';
+import {
+    getReviewerSystemPrompt, getCriticSystemPrompt,
+    getReviewCritiquePrompt, getReviewRebuttalPrompt,
+    getDebateChallengePrompt, getDebateDefensePrompt,
+    getReviewSynthesisPrompt, getDebateSynthesisPrompt,
+} from '../chat/systemPromptBuilder.js';
 import { logger } from '../utils/logger.js';
 import { stripThinkingBlocks } from '../utils/contentUtils.js';
 
@@ -62,6 +68,8 @@ export class AgentEngine {
     private consecutiveMistakeCount: number = 0;
     private reviewIterations: number = 0;
     private debateIterations: number = 0;
+    private reviewSession: ReviewSessionState | null = null;
+    private debateSession: DebateSessionState | null = null;
     private planner: Planner = new Planner();
     private executor: Executor = new Executor();
     private observer: Observer = new Observer();
@@ -153,6 +161,15 @@ export class AgentEngine {
                         break;
                     case 'Debating':
                         await this.handleDebate();
+                        break;
+                    case 'WaitingForReviewDecision':
+                        await this.handleWaitingForReviewDecision();
+                        break;
+                    case 'WaitingForDebateDecision':
+                        await this.handleWaitingForDebateDecision();
+                        break;
+                    case 'Synthesizing':
+                        await this.handleSynthesis();
                         break;
                     default:
                         await this.transitionTo('Idle');
@@ -618,162 +635,430 @@ ${fileContext}${searchReplaceHint}
     }
 
     /**
-     * Multi-model review: Reviewer 모델이 현재 step의 코드 변경을 리뷰합니다.
-     * PASS → 다음 step, NEEDS_FIX → Fixing 상태로 전환하여 수정 루프
+     * Multi-model review: Multi-round critique/rebuttal with convergence detection.
+     * Odd rounds: Reviewer CRITIQUE, Even rounds: Coder REBUTTAL.
+     * On convergence/maxIter → Synthesizing → WaitingForReviewDecision.
      */
     private async handleReview(): Promise<void> {
         const maxIter = this.context.maxReviewIterations ?? 3;
+        const strategy = this.context.agentStrategy ?? 'review';
+
+        // Initialize session if needed
+        if (!this.reviewSession) {
+            this.reviewSession = {
+                strategy,
+                rounds: [],
+                convergence: null,
+                synthesisResult: null,
+            };
+        }
+
         this.reviewIterations++;
 
         if (this.reviewIterations > maxIter) {
-            logger.info('[AgentEngine]', `Review iterations exceeded max (${maxIter}), proceeding`);
-            this.reviewIterations = 0;
-            await this.transitionTo('Executing');
+            logger.info('[AgentEngine]', `Review iterations exceeded max (${maxIter}), moving to synthesis`);
+            await this.transitionTo('Synthesizing');
             return;
         }
 
         const step = this.plan[this.currentStepIndex];
         if (!step) {
             this.reviewIterations = 0;
+            this.reviewSession = null;
             await this.transitionTo('Executing');
             return;
         }
 
+        const roundNumber = this.reviewIterations;
+        const isOddRound = roundNumber % 2 === 1;
+
         if (this.context.onMessage) {
-            this.context.onMessage('assistant', `🔍 **Reviewing** (round ${this.reviewIterations}/${maxIter})...`);
+            const roleLabel = isOddRound ? 'Critique' : 'Rebuttal';
+            this.context.onMessage('assistant', `🔍 **Review ${roleLabel}** (round ${roundNumber}/${maxIter})...`);
         }
 
         try {
-            const reviewPrompt = `Review the following code change:
+            const codeContext = `**Step**: ${step.description}\n**Action**: ${step.action ?? '(no action recorded)'}\n**Result**: ${step.result ?? '(no result)'}`;
 
-**Step**: ${step.description}
-**Action**: ${step.action ?? '(no action recorded)'}
-**Result**: ${step.result ?? '(no result)'}
+            // Build conversation from previous rounds
+            const previousRoundsText = this.reviewSession.rounds
+                .map(r => `[Round ${r.round} - ${r.role}]:\n${r.content}`)
+                .join('\n\n');
 
-Provide your review as a JSON object.`;
+            if (isOddRound) {
+                // Reviewer CRITIQUE
+                const critiquePrompt = `Review the following code change:\n\n${codeContext}${previousRoundsText ? `\n\nPrevious discussion:\n${previousRoundsText}` : ''}\n\nProvide your structured critique.`;
 
-            const reviewResponse = await this.streamWithUI(
-                [{ role: 'user', content: reviewPrompt }],
-                this.context.reviewerModel,
-                getReviewerSystemPrompt()
-            );
+                const response = await this.streamWithUI(
+                    [{ role: 'user', content: critiquePrompt }],
+                    this.context.reviewerModel,
+                    getReviewCritiquePrompt(strategy)
+                );
 
-            const feedback = this.parseReviewFeedback(reviewResponse);
-
-            if (feedback && feedback.verdict === 'PASS') {
-                logger.info('[AgentEngine]', 'Review: PASS');
-                if (this.context.onMessage) {
-                    this.context.onMessage('assistant', `✅ **Review PASSED**: ${feedback.summary}`);
-                }
-                this.reviewIterations = 0;
-                await this.transitionTo('Executing');
-            } else if (feedback && feedback.verdict === 'NEEDS_FIX') {
-                logger.info('[AgentEngine]', `Review: NEEDS_FIX — ${feedback.issues.length} issue(s)`);
-                const issueList = feedback.issues.map(i => `- **[${i.severity}]** ${i.description}${i.suggestion ? ` → ${i.suggestion}` : ''}`).join('\n');
-                if (this.context.onMessage) {
-                    this.context.onMessage('assistant', `❌ **Review NEEDS_FIX**: ${feedback.summary}\n${issueList}`);
-                }
-                // Store feedback in step result for the Fixing handler
-                step.status = 'failed';
-                step.result = `[Review NEEDS_FIX] ${feedback.summary}\n${issueList}`;
-                this.notifyPlanChange();
-                await this.transitionTo('Fixing');
+                this.reviewSession.rounds.push({
+                    round: roundNumber,
+                    role: 'critique',
+                    content: response,
+                });
             } else {
-                // Could not parse feedback — proceed anyway
-                logger.warn('[AgentEngine]', 'Review: Could not parse feedback, proceeding');
-                this.reviewIterations = 0;
-                await this.transitionTo('Executing');
+                // Coder REBUTTAL (uses default model)
+                const rebuttalPrompt = `The reviewer has provided critique of your code change:\n\n${codeContext}\n\nPrevious discussion:\n${previousRoundsText}\n\nProvide your structured rebuttal.`;
+
+                const response = await this.streamWithUI(
+                    [{ role: 'user', content: rebuttalPrompt }],
+                    undefined,
+                    getReviewRebuttalPrompt(strategy)
+                );
+
+                this.reviewSession.rounds.push({
+                    round: roundNumber,
+                    role: 'rebuttal',
+                    content: response,
+                });
+            }
+
+            // Compute convergence
+            const convergence = computeConvergence(this.reviewSession.rounds);
+            this.reviewSession.convergence = convergence;
+
+            logger.info('[AgentEngine]', `Review convergence: score=${convergence.overallScore.toFixed(2)}, recommendation=${convergence.recommendation}`);
+
+            if (this.context.onMessage) {
+                this.context.onMessage('assistant', `📊 Convergence: ${convergence.overallScore.toFixed(2)} (${convergence.recommendation})`);
+            }
+
+            if (convergence.recommendation === 'converged' || convergence.recommendation === 'stalled') {
+                await this.transitionTo('Synthesizing');
+            } else {
+                // Continue to next round
+                await this.transitionTo('Reviewing');
             }
         } catch (error) {
             logger.error('[AgentEngine]', 'Review failed', error);
             this.reviewIterations = 0;
+            this.reviewSession = null;
             await this.transitionTo('Executing');
         }
     }
 
     /**
-     * Multi-model debate: Critic 모델이 플랜을 비평합니다.
-     * APPROVE → Executing, CHALLENGE → Planner가 플랜 수정 후 다시 Debating
+     * Multi-model debate: Multi-round challenge/defense with convergence detection.
+     * 'debate' strategy: Odd rounds = Critic CHALLENGE, Even rounds = Planner DEFENSE.
+     * 'perspectives' strategy: Round 1 = Risk lens, Round 2 = Innovation lens, Round 3 = Cross-review.
+     * On convergence/maxIter → Synthesizing → WaitingForDebateDecision.
      */
     private async handleDebate(): Promise<void> {
         const maxIter = this.context.maxDebateIterations ?? 2;
+        const strategy = this.context.planStrategy ?? 'debate';
+
+        // Initialize session if needed
+        if (!this.debateSession) {
+            this.debateSession = {
+                strategy,
+                rounds: [],
+                convergence: null,
+                synthesisResult: null,
+            };
+        }
+
         this.debateIterations++;
 
         if (this.debateIterations > maxIter) {
-            logger.info('[AgentEngine]', `Debate iterations exceeded max (${maxIter}), proceeding`);
-            this.debateIterations = 0;
-            await this.transitionTo('Executing');
+            logger.info('[AgentEngine]', `Debate iterations exceeded max (${maxIter}), moving to synthesis`);
+            await this.transitionTo('Synthesizing');
             return;
         }
 
-        if (this.context.onMessage) {
-            this.context.onMessage('assistant', `💬 **Debating plan** (round ${this.debateIterations}/${maxIter})...`);
-        }
+        const planSummary = this.plan.map((s, i) => `${i + 1}. ${s.description}`).join('\n');
+        const planContext = `**User request**: ${this.context.userInput}\n\n**Plan**:\n${planSummary}`;
+
+        const previousRoundsText = this.debateSession.rounds
+            .map(r => `[Round ${r.round} - ${r.role}]:\n${r.content}`)
+            .join('\n\n');
+
+        const roundNumber = this.debateIterations;
 
         try {
-            const planSummary = this.plan.map((s, i) => `${i + 1}. ${s.description}`).join('\n');
-            const debatePrompt = `Evaluate the following development plan:
+            if (strategy === 'perspectives') {
+                // Perspectives strategy: Risk → Innovation → Cross-review
+                let role: DiscussionRound['role'];
+                let systemPrompt: string;
+                let overrideModel: string | undefined;
 
-**User request**: ${this.context.userInput}
-
-**Plan**:
-${planSummary}
-
-Provide your critique as a JSON object.`;
-
-            const debateResponse = await this.streamWithUI(
-                [{ role: 'user', content: debatePrompt }],
-                this.context.criticModel,
-                getCriticSystemPrompt()
-            );
-
-            const feedback = this.parseDebateFeedback(debateResponse);
-
-            if (feedback && feedback.verdict === 'APPROVE') {
-                logger.info('[AgentEngine]', 'Debate: APPROVE');
-                if (this.context.onMessage) {
-                    this.context.onMessage('assistant', `✅ **Plan APPROVED** by critic`);
-                }
-                this.debateIterations = 0;
-                await this.transitionTo('Executing');
-            } else if (feedback && feedback.verdict === 'CHALLENGE') {
-                logger.info('[AgentEngine]', `Debate: CHALLENGE — ${feedback.concerns.length} concern(s)`);
-                const concernList = feedback.concerns.map(c => `- ${c}`).join('\n');
-                const suggestionList = feedback.suggestions.map(s => `- ${s}`).join('\n');
-                if (this.context.onMessage) {
-                    this.context.onMessage('assistant', `⚠️ **Plan CHALLENGED**:\n**Concerns:**\n${concernList}\n**Suggestions:**\n${suggestionList}`);
+                if (roundNumber === 1) {
+                    role = 'risk-analysis';
+                    systemPrompt = getDebateChallengePrompt('perspectives');
+                    overrideModel = this.context.criticModel;
+                    if (this.context.onMessage) {
+                        this.context.onMessage('assistant', `🔴 **Risk Analysis** (round ${roundNumber}/${maxIter})...`);
+                    }
+                } else if (roundNumber === 2) {
+                    role = 'innovation-analysis';
+                    systemPrompt = getDebateChallengePrompt('perspectives');
+                    overrideModel = undefined; // default model
+                    if (this.context.onMessage) {
+                        this.context.onMessage('assistant', `🟢 **Innovation Analysis** (round ${roundNumber}/${maxIter})...`);
+                    }
+                } else {
+                    role = 'cross-review';
+                    systemPrompt = getDebateDefensePrompt('perspectives');
+                    overrideModel = this.context.criticModel;
+                    if (this.context.onMessage) {
+                        this.context.onMessage('assistant', `🔄 **Cross-Review** (round ${roundNumber}/${maxIter})...`);
+                    }
                 }
 
-                // Ask Planner to revise the plan with critic feedback
-                const revisePrompt = `The plan critic has challenged your plan with these concerns:
-${concernList}
+                const prompt = `${planContext}${previousRoundsText ? `\n\nPrevious analysis:\n${previousRoundsText}` : ''}\n\nYour assigned role for this round: **${role}**`;
 
-And these suggestions:
-${suggestionList}
+                const response = await this.streamWithUI(
+                    [{ role: 'user', content: prompt }],
+                    overrideModel,
+                    systemPrompt
+                );
 
-Please revise the plan. Output ONLY a markdown checklist (- [ ] ...) with the revised steps.
-Original user request: ${this.context.userInput}`;
-
-                const revisedResponse = await this.streamWithUI([{ role: 'user', content: revisePrompt }]);
-                const revisedPlan = this.planner.parsePlan(revisedResponse);
-
-                if (revisedPlan.length > 0) {
-                    this.plan = revisedPlan;
-                    this.notifyPlanChange();
-                }
-
-                // Loop back to Debating for another round
-                await this.transitionTo('Debating');
+                this.debateSession.rounds.push({ round: roundNumber, role, content: response });
             } else {
-                // Could not parse feedback — proceed anyway
-                logger.warn('[AgentEngine]', 'Debate: Could not parse feedback, proceeding');
-                this.debateIterations = 0;
-                await this.transitionTo('Executing');
+                // Debate strategy: Odd = Critic CHALLENGE, Even = Planner DEFENSE
+                const isOddRound = roundNumber % 2 === 1;
+
+                if (isOddRound) {
+                    if (this.context.onMessage) {
+                        this.context.onMessage('assistant', `💬 **Debate Challenge** (round ${roundNumber}/${maxIter})...`);
+                    }
+
+                    const challengePrompt = `${planContext}${previousRoundsText ? `\n\nPrevious discussion:\n${previousRoundsText}` : ''}\n\nProvide your structured critique.`;
+
+                    const response = await this.streamWithUI(
+                        [{ role: 'user', content: challengePrompt }],
+                        this.context.criticModel,
+                        getDebateChallengePrompt('debate')
+                    );
+
+                    this.debateSession.rounds.push({ round: roundNumber, role: 'challenge', content: response });
+                } else {
+                    if (this.context.onMessage) {
+                        this.context.onMessage('assistant', `💬 **Debate Defense** (round ${roundNumber}/${maxIter})...`);
+                    }
+
+                    const defensePrompt = `${planContext}\n\nPrevious discussion:\n${previousRoundsText}\n\nProvide your structured defense.`;
+
+                    const response = await this.streamWithUI(
+                        [{ role: 'user', content: defensePrompt }],
+                        undefined,
+                        getDebateDefensePrompt('debate')
+                    );
+
+                    this.debateSession.rounds.push({ round: roundNumber, role: 'defense', content: response });
+                }
+            }
+
+            // Compute convergence
+            const convergence = computeConvergence(this.debateSession.rounds);
+            this.debateSession.convergence = convergence;
+
+            logger.info('[AgentEngine]', `Debate convergence: score=${convergence.overallScore.toFixed(2)}, recommendation=${convergence.recommendation}`);
+
+            if (this.context.onMessage) {
+                this.context.onMessage('assistant', `📊 Convergence: ${convergence.overallScore.toFixed(2)} (${convergence.recommendation})`);
+            }
+
+            if (convergence.recommendation === 'converged' || convergence.recommendation === 'stalled') {
+                await this.transitionTo('Synthesizing');
+            } else {
+                await this.transitionTo('Debating');
             }
         } catch (error) {
             logger.error('[AgentEngine]', 'Debate failed', error);
             this.debateIterations = 0;
+            this.debateSession = null;
             await this.transitionTo('Executing');
+        }
+    }
+
+    /**
+     * Synthesize multi-round discussion results into a concise summary.
+     * Handles both review and debate sessions.
+     */
+    private async handleSynthesis(): Promise<void> {
+        const isReview = this.reviewSession !== null;
+        const session = isReview ? this.reviewSession : this.debateSession;
+
+        if (!session || session.rounds.length === 0) {
+            logger.warn('[AgentEngine]', 'Synthesis: No session or rounds available');
+            if (isReview) {
+                this.reviewIterations = 0;
+                this.reviewSession = null;
+                await this.transitionTo('Executing');
+            } else {
+                this.debateIterations = 0;
+                this.debateSession = null;
+                await this.transitionTo('Executing');
+            }
+            return;
+        }
+
+        if (this.context.onMessage) {
+            this.context.onMessage('assistant', `🔄 **Synthesizing** ${isReview ? 'review' : 'debate'} results...`);
+        }
+
+        try {
+            const roundsSummary = session.rounds
+                .map(r => `[Round ${r.round} - ${r.role}]:\n${r.content}`)
+                .join('\n\n---\n\n');
+
+            const synthesisPrompt = `Here are the discussion rounds to synthesize:\n\n${roundsSummary}\n\nPlease provide a comprehensive synthesis.`;
+            const systemPrompt = isReview ? getReviewSynthesisPrompt() : getDebateSynthesisPrompt();
+
+            const synthesisResponse = await this.streamWithUI(
+                [{ role: 'user', content: synthesisPrompt }],
+                undefined,
+                systemPrompt
+            );
+
+            session.synthesisResult = synthesisResponse;
+
+            if (this.context.onSynthesisComplete) {
+                this.context.onSynthesisComplete(synthesisResponse);
+            }
+        } catch (error) {
+            logger.error('[AgentEngine]', 'Synthesis failed, using fallback', error);
+            // Fallback: concatenate round contents
+            session.synthesisResult = session.rounds.map(r => `[${r.role}]: ${r.content}`).join('\n\n');
+
+            if (this.context.onSynthesisComplete) {
+                this.context.onSynthesisComplete(session.synthesisResult);
+            }
+        }
+
+        if (isReview) {
+            await this.transitionTo('WaitingForReviewDecision');
+        } else {
+            await this.transitionTo('WaitingForDebateDecision');
+        }
+    }
+
+    /**
+     * Pause engine and wait for user decision on review results.
+     * Uses Promise to suspend until resolveReviewDecision() is called.
+     */
+    private async handleWaitingForReviewDecision(): Promise<void> {
+        if (!this.reviewSession) {
+            await this.transitionTo('Executing');
+            return;
+        }
+
+        // Extract final feedback from the last critique round
+        const lastCritique = [...this.reviewSession.rounds].reverse().find(r => r.role === 'critique');
+        const feedback = lastCritique ? this.parseReviewFeedback(lastCritique.content) : null;
+
+        // Notify UI with complete results
+        if (this.context.onReviewComplete) {
+            this.context.onReviewComplete(
+                feedback ?? { verdict: 'NEEDS_FIX', summary: 'Review completed', issues: [] },
+                this.reviewSession.rounds,
+                this.reviewSession.convergence
+            );
+        }
+
+        // Create Promise and wait for user decision
+        const decision = await new Promise<'apply_fix' | 'skip'>((resolve) => {
+            this.context.reviewDecisionResolver = resolve;
+        });
+
+        logger.info('[AgentEngine]', `Review decision: ${decision}`);
+        this.context.reviewDecisionResolver = null;
+
+        const step = this.plan[this.currentStepIndex];
+
+        if (decision === 'apply_fix' && step && feedback) {
+            // Transition to Fixing with review feedback
+            const issueList = feedback.issues.map(i => `- **[${i.severity}]** ${i.description}${i.suggestion ? ` → ${i.suggestion}` : ''}`).join('\n');
+            step.status = 'failed';
+            step.result = `[Review NEEDS_FIX] ${feedback.summary}\n${issueList}\n\n[Synthesis]: ${this.reviewSession.synthesisResult ?? ''}`;
+            this.notifyPlanChange();
+            this.reviewIterations = 0;
+            this.reviewSession = null;
+            await this.transitionTo('Fixing');
+        } else {
+            // Skip — proceed to next step
+            this.reviewIterations = 0;
+            this.reviewSession = null;
+            await this.transitionTo('Executing');
+        }
+    }
+
+    /**
+     * Pause engine and wait for user decision on debate results.
+     * Uses Promise to suspend until resolveDebateDecision() is called.
+     */
+    private async handleWaitingForDebateDecision(): Promise<void> {
+        if (!this.debateSession) {
+            await this.transitionTo('Executing');
+            return;
+        }
+
+        // Extract final feedback from the last challenge round
+        const lastChallenge = [...this.debateSession.rounds].reverse().find(
+            r => r.role === 'challenge' || r.role === 'cross-review'
+        );
+        const feedback = lastChallenge ? this.parseDebateFeedback(lastChallenge.content) : null;
+
+        // Notify UI with complete results
+        if (this.context.onDebateComplete) {
+            this.context.onDebateComplete(
+                feedback ?? { verdict: 'CHALLENGE', concerns: [], suggestions: [] },
+                this.debateSession.rounds,
+                this.debateSession.convergence
+            );
+        }
+
+        // Create Promise and wait for user decision
+        const decision = await new Promise<'revise' | 'accept'>((resolve) => {
+            this.context.debateDecisionResolver = resolve;
+        });
+
+        logger.info('[AgentEngine]', `Debate decision: ${decision}`);
+        this.context.debateDecisionResolver = null;
+
+        if (decision === 'revise') {
+            // Revise plan with synthesis feedback
+            const synthesisContext = this.debateSession.synthesisResult ?? '';
+            const revisePrompt = `Based on the debate synthesis, revise the plan:\n\n${synthesisContext}\n\nOriginal user request: ${this.context.userInput}\n\nOutput ONLY a markdown checklist (- [ ] ...) with the revised steps.`;
+
+            const revisedResponse = await this.streamWithUI([{ role: 'user', content: revisePrompt }]);
+            const revisedPlan = this.planner.parsePlan(revisedResponse);
+
+            if (revisedPlan.length > 0) {
+                this.plan = revisedPlan;
+                this.notifyPlanChange();
+            }
+
+            this.debateIterations = 0;
+            this.debateSession = null;
+            await this.transitionTo('Planning');
+        } else {
+            // Accept — proceed with current plan
+            this.debateIterations = 0;
+            this.debateSession = null;
+            await this.transitionTo('Executing');
+        }
+    }
+
+    /**
+     * Public method for UI to resolve review decision.
+     */
+    public resolveReviewDecision(decision: 'apply_fix' | 'skip'): void {
+        if (this.context.reviewDecisionResolver) {
+            this.context.reviewDecisionResolver(decision);
+        }
+    }
+
+    /**
+     * Public method for UI to resolve debate decision.
+     */
+    public resolveDebateDecision(decision: 'revise' | 'accept'): void {
+        if (this.context.debateDecisionResolver) {
+            this.context.debateDecisionResolver(decision);
         }
     }
 
@@ -787,6 +1072,10 @@ Original user request: ${this.context.userInput}`;
                     verdict: parsed.verdict,
                     summary: parsed.summary || '',
                     issues: Array.isArray(parsed.issues) ? parsed.issues : [],
+                    pointsOfAgreement: Array.isArray(parsed.pointsOfAgreement) ? parsed.pointsOfAgreement : undefined,
+                    pointsOfDisagreement: Array.isArray(parsed.pointsOfDisagreement) ? parsed.pointsOfDisagreement : undefined,
+                    unexaminedAssumptions: Array.isArray(parsed.unexaminedAssumptions) ? parsed.unexaminedAssumptions : undefined,
+                    missingConsiderations: Array.isArray(parsed.missingConsiderations) ? parsed.missingConsiderations : undefined,
                 };
             }
         } catch {
@@ -805,6 +1094,10 @@ Original user request: ${this.context.userInput}`;
                     verdict: parsed.verdict,
                     concerns: Array.isArray(parsed.concerns) ? parsed.concerns : [],
                     suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions : [],
+                    securityRisks: Array.isArray(parsed.securityRisks) ? parsed.securityRisks : undefined,
+                    edgeCases: Array.isArray(parsed.edgeCases) ? parsed.edgeCases : undefined,
+                    scalabilityConcerns: Array.isArray(parsed.scalabilityConcerns) ? parsed.scalabilityConcerns : undefined,
+                    maintenanceBurden: Array.isArray(parsed.maintenanceBurden) ? parsed.maintenanceBurden : undefined,
                 };
             }
         } catch {
@@ -912,6 +1205,16 @@ Original user request: ${this.context.userInput}`;
      * Agent 모드에서 요청마다 호출하여 이전 실행의 잔류 상태를 제거합니다.
      */
     public reset(): void {
+        // Resolve any pending decisions before clearing state
+        if (this.context.reviewDecisionResolver) {
+            this.context.reviewDecisionResolver('skip');
+            this.context.reviewDecisionResolver = null;
+        }
+        if (this.context.debateDecisionResolver) {
+            this.context.debateDecisionResolver('accept');
+            this.context.debateDecisionResolver = null;
+        }
+
         this.state = 'Idle';
         this.plan = [];
         this.currentStepIndex = -1;
@@ -919,6 +1222,8 @@ Original user request: ${this.context.userInput}`;
         this.consecutiveMistakeCount = 0;
         this.reviewIterations = 0;
         this.debateIterations = 0;
+        this.reviewSession = null;
+        this.debateSession = null;
         this.lastDiagnostics = [];
     }
 
@@ -930,6 +1235,46 @@ Original user request: ${this.context.userInput}`;
         this.plan = this.planner.parsePlan(response);
         this.notifyPlanChange();
         // 의도적으로 state를 'Executing'으로 전환하지 않음 — 계획 표시만
+    }
+
+    /**
+     * Agent 모드 전용: Apply Changes 후 multi-model review를 시작합니다.
+     * chatPanel에서 파일 작업이 성공한 뒤 호출됩니다.
+     * 합성 PlanStep을 생성하고 Reviewing 상태에서 run()을 실행합니다.
+     */
+    public async startReviewForOperations(
+        operationDescriptions: string[],
+        operationResults: string
+    ): Promise<void> {
+        // 합성 PlanStep 생성
+        const syntheticStep: PlanStep = {
+            id: `review-${Date.now()}`,
+            description: operationDescriptions.join('; '),
+            status: 'done',
+            action: operationDescriptions.map(d => `[Applied] ${d}`).join('\n'),
+            result: operationResults,
+        };
+
+        this.plan = [syntheticStep];
+        this.currentStepIndex = 0;
+        this.reviewIterations = 0;
+        this.reviewSession = null;
+        this.notifyPlanChange();
+
+        await this.transitionTo('Reviewing');
+        await this.run();
+    }
+
+    /**
+     * Plan 모드 전용: Apply Changes 없이 debate를 시작합니다.
+     * chatPanel에서 Plan 응답 후 호출됩니다.
+     */
+    public async startDebateForPlan(): Promise<void> {
+        this.debateIterations = 0;
+        this.debateSession = null;
+
+        await this.transitionTo('Debating');
+        await this.run();
     }
 
     public stop(): void {
