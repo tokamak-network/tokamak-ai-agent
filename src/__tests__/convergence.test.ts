@@ -98,7 +98,7 @@ describe('computeConvergence', () => {
         ];
         const result = computeConvergence(rounds);
         // Only 2 rounds, different roles → no same-role pairs → avgStability=0
-        // stalled requires >= 4 rounds now
+        // stalled requires >= 3 rounds
         expect(result.recommendation).toBe('continue');
     });
 
@@ -111,20 +111,18 @@ describe('computeConvergence', () => {
             { round: 4, role: 'rebuttal', content: 'I accept all points. The assessment is fair and correct. Agreed.' },
         ];
         const result = computeConvergence(rounds);
-        expect(result.agreementRatio).toBeGreaterThanOrEqual(0.6);
-        expect(result.avgStability).toBeGreaterThanOrEqual(0.7);
+        expect(result.agreementRatio).toBeGreaterThanOrEqual(0.55);
+        expect(result.avgStability).toBeGreaterThanOrEqual(0.5);
         expect(result.recommendation).toBe('converged');
     });
 
-    it('returns stalled after 4+ rounds when same-role content diverges', () => {
+    it('returns stalled after 3+ rounds when not converged', () => {
         const rounds: DiscussionRound[] = [
             { round: 1, role: 'critique', content: 'Alpha bravo charlie delta echo foxtrot.' },
             { round: 2, role: 'rebuttal', content: 'Golf hotel india juliet kilo lima.' },
             { round: 3, role: 'critique', content: 'Xylophone quantum rhinoceros symmetry topology.' },
-            { round: 4, role: 'rebuttal', content: 'Umbrella volcano waterfall xenon yellow zebra.' },
         ];
         const result = computeConvergence(rounds);
-        expect(result.avgStability).toBeLessThan(0.3);
         expect(result.recommendation).toBe('stalled');
     });
 
@@ -136,6 +134,19 @@ describe('computeConvergence', () => {
         const result = computeConvergence(rounds);
         // Even though content is completely different, 2 rounds is too early
         expect(result.recommendation).toBe('continue');
+    });
+
+    it('returns converged when avgStability >= 0.8 regardless of agreement ratio', () => {
+        // Same-role rounds are nearly identical → high stability, but low agreement keywords
+        const rounds: DiscussionRound[] = [
+            { round: 1, role: 'critique', content: 'Alpha bravo charlie delta echo foxtrot golf hotel.' },
+            { round: 2, role: 'rebuttal', content: 'India juliet kilo lima mike november oscar papa.' },
+            { round: 3, role: 'critique', content: 'Alpha bravo charlie delta echo foxtrot golf hotel.' },
+            { round: 4, role: 'rebuttal', content: 'India juliet kilo lima mike november oscar papa.' },
+        ];
+        const result = computeConvergence(rounds);
+        expect(result.avgStability).toBeGreaterThanOrEqual(0.8);
+        expect(result.recommendation).toBe('converged');
     });
 
     it('computes overallScore as weighted average', () => {

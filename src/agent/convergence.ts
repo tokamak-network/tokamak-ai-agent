@@ -49,8 +49,8 @@ export function jaccardSimilarity(a: string, b: string): number {
  * Stability는 같은 역할끼리 비교합니다 (critique1↔critique2, rebuttal1↔rebuttal2).
  * Critique↔Rebuttal은 당연히 어휘가 다르므로, 연속 라운드 비교는 오탐을 유발합니다.
  *
- * - converged: agreementRatio >= 0.6 AND avgStability >= 0.7
- * - stalled: rounds >= 4 (최소 2 사이클) AND avgStability < 0.3
+ * - converged: agreementRatio >= 0.55 AND avgStability >= 0.5, OR avgStability >= 0.8
+ * - stalled: rounds >= 3
  * - continue: otherwise
  */
 export function computeConvergence(rounds: DiscussionRound[]): ConvergenceMetrics {
@@ -89,10 +89,10 @@ export function computeConvergence(rounds: DiscussionRound[]): ConvergenceMetric
     const overallScore = (agreementRatio * 0.6) + (avgStability * 0.4);
 
     let recommendation: ConvergenceMetrics['recommendation'] = 'continue';
-    if (agreementRatio >= 0.6 && avgStability >= 0.7) {
+    if ((agreementRatio >= 0.55 && avgStability >= 0.5) || avgStability >= 0.8) {
         recommendation = 'converged';
-    } else if (rounds.length >= 4 && avgStability < 0.3) {
-        // 최소 2 사이클(4 라운드) 이후에만 stalled 판정
+    } else if (rounds.length >= 3) {
+        // maxReviewIterations=3과 정합 — 3라운드 이상이면 stalled
         recommendation = 'stalled';
     }
 

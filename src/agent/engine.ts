@@ -660,6 +660,11 @@ ${fileContext}${searchReplaceHint}
 
         if (this.reviewIterations > maxIter) {
             logger.info('[AgentEngine]', `Review iterations exceeded max (${maxIter}), moving to synthesis`);
+            if (this.reviewSession && !this.reviewSession.convergence) {
+                const convergence = computeConvergence(this.reviewSession.rounds);
+                convergence.recommendation = 'stalled';
+                this.reviewSession.convergence = convergence;
+            }
             await this.transitionTo('Synthesizing');
             return;
         }

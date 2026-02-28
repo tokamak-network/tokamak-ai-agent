@@ -42,6 +42,8 @@ export class ChatPanel {
     /** 마지막 리뷰/비평 결과 저장 — Apply Fix / Revise Plan 시 채팅에 전달 */
     private lastReviewSynthesis: string = '';
     private lastDebateSynthesis: string = '';
+    /** Apply Fix 후 다음 Apply Changes에서 리뷰 재시작을 방지 */
+    private skipNextReview: boolean = false;
 
     public static setContext(context: vscode.ExtensionContext): void {
         ChatPanel.extensionContext = context;
@@ -314,6 +316,7 @@ export class ChatPanel {
                     if (message.decision === 'apply_fix') {
                         // Agent 모드: 엔진의 Fixing 대신 리뷰 피드백을 채팅 메시지로 전달
                         // 엔진은 skip으로 정상 종료
+                        this.skipNextReview = true;
                         this.agentEngine.resolveReviewDecision('skip');
                         // 리뷰 피드백을 사용자 메시지로 주입 → AI가 새 FILE_OPERATION으로 수정
                         const reviewFeedback = this.lastReviewSynthesis || 'Code review found issues that need fixing.';
@@ -1244,7 +1247,10 @@ export class ChatPanel {
                 vscode.window.showInformationMessage(`Successfully applied and saved ${successCount} file operation(s).`);
 
                 // ── Multi-Model Review: Apply Changes 성공 후 리뷰 시작 ──
-                if (this.currentMode === 'agent' && this.agentEngine && getEnableMultiModelReview()) {
+                // Apply Fix에서 온 수정인 경우 리뷰를 건너뛴다 (무한 루프 방지)
+                if (this.skipNextReview) {
+                    this.skipNextReview = false;
+                } else if (this.currentMode === 'agent' && this.agentEngine && getEnableMultiModelReview()) {
                     const opDescriptions = this.pendingOperations.map(op =>
                         `[${op.type}] ${op.path}${op.description ? ': ' + op.description : ''}`
                     );
