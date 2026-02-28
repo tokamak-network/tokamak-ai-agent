@@ -255,6 +255,60 @@ describe('AgentEngine — New States in run() switch', () => {
     });
 });
 
+describe('AgentEngine — maxIter convergence recording', () => {
+    it('startReviewForOperations records convergence as stalled when maxIter exceeded', async () => {
+        const states: AgentState[] = [];
+        let capturedConvergence: ConvergenceMetrics | null = null;
+
+        const context = createTestContext({
+            maxReviewIterations: 3,
+            onStateChange: (s) => states.push(s),
+            onReviewComplete: (feedback, rounds, convergence) => {
+                capturedConvergence = convergence;
+            },
+        });
+        const engine = new AgentEngine(context);
+
+        // Mock 3 review rounds (critique, rebuttal, critique) + synthesis + WaitingForReviewDecision
+        // Round 1 (critique): divergent content → won't converge
+        mockStreamResponse.mockReturnValueOnce(
+            'The implementation has several issues and concerns about error handling.\n\n---\n{"verdict":"NEEDS_FIX","summary":"Issues found","issues":[{"severity":"minor","description":"error handling","suggestion":"add try-catch"}]}'
+        );
+        // Round 2 (rebuttal): different divergent content
+        mockStreamResponse.mockReturnValueOnce(
+            'The approach is fundamentally different and uses a novel architecture.\n\n---\n{"verdict":"NEEDS_FIX","summary":"Different perspective","issues":[{"severity":"minor","description":"architecture","suggestion":"refactor"}]}'
+        );
+        // Round 3 (critique): yet another divergent text → rounds.length=3 → stalled
+        mockStreamResponse.mockReturnValueOnce(
+            'Performance bottlenecks and memory leaks detected in the module.\n\n---\n{"verdict":"NEEDS_FIX","summary":"Performance issues","issues":[{"severity":"major","description":"performance","suggestion":"optimize"}]}'
+        );
+        // Synthesis response
+        mockStreamResponse.mockReturnValueOnce(
+            'Final synthesis: Multiple issues remain.\n\n{"verdict":"NEEDS_FIX","summary":"Unresolved issues","resolvedCount":0,"remainingCount":3}'
+        );
+
+        // Start the review loop — it will run rounds until stalled/converged, then synthesize
+        const runPromise = engine.startReviewForOperations(
+            ['[edit] src/index.ts: fix bug'],
+            'Applied 1 operation(s) successfully.'
+        );
+
+        // Give time for all rounds + synthesis + WaitingForReviewDecision
+        await new Promise(r => setTimeout(r, 200));
+
+        // Resolve the decision to let run() finish
+        engine.resolveReviewDecision('skip');
+        await runPromise;
+
+        // Verify state transitions include Synthesizing
+        expect(states).toContain('Synthesizing');
+
+        // Verify convergence was captured and marked as stalled
+        expect(capturedConvergence).not.toBeNull();
+        expect(capturedConvergence!.recommendation).toBe('stalled');
+    });
+});
+
 describe('AgentEngine — Strategy Selection', () => {
     it('updateContext changes agentStrategy', () => {
         const context = createTestContext({ agentStrategy: 'review' });
