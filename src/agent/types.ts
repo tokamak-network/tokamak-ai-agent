@@ -8,6 +8,8 @@ export type AgentState =
     | 'Observing'
     | 'Reflecting'
     | 'Fixing'
+    | 'Reviewing'
+    | 'Debating'
     | 'Done'
     | 'Error';
 
@@ -41,6 +43,24 @@ export interface AgentContext {
     onStreamStart?: () => void;
     onStreamChunk?: (chunk: string) => void;
     onStreamEnd?: () => void;
+    /** Multi-model review settings */
+    enableMultiModelReview?: boolean;
+    reviewerModel?: string;
+    criticModel?: string;
+    maxReviewIterations?: number;
+    maxDebateIterations?: number;
+}
+
+export interface ReviewFeedback {
+    verdict: 'PASS' | 'NEEDS_FIX';
+    summary: string;
+    issues: { severity: 'critical' | 'major' | 'minor'; description: string; suggestion?: string }[];
+}
+
+export interface DebateFeedback {
+    verdict: 'APPROVE' | 'CHALLENGE';
+    concerns: string[];
+    suggestions: string[];
 }
 
 export interface AgentAction {

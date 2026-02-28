@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { streamChatCompletion, ChatMessage, isVisionCapable } from '../api/client.js';
-import { isConfigured, promptForConfiguration, getAvailableModels, getSelectedModel, setSelectedModel, isCheckpointsEnabled } from '../config/settings.js';
+import { isConfigured, promptForConfiguration, getAvailableModels, getSelectedModel, setSelectedModel, isCheckpointsEnabled, getEnableMultiModelReview, setEnableMultiModelReview, getReviewerModel, setReviewerModel, getCriticModel, setCriticModel, getMaxReviewIterations, getMaxDebateIterations } from '../config/settings.js';
 import { AgentEngine } from '../agent/engine.js';
 import { AgentContext } from '../agent/types.js';
 import {
@@ -103,7 +103,13 @@ export class ChatPanel {
             },
             onStreamEnd: () => {
                 this.panel.webview.postMessage({ command: 'endStreaming' });
-            }
+            },
+            // Multi-model review settings
+            enableMultiModelReview: getEnableMultiModelReview(),
+            reviewerModel: getReviewerModel() || getSelectedModel(),
+            criticModel: getCriticModel() || getSelectedModel(),
+            maxReviewIterations: getMaxReviewIterations(),
+            maxDebateIterations: getMaxDebateIterations(),
         };
         this.agentEngine = new AgentEngine(context);
     }
@@ -239,6 +245,32 @@ export class ChatPanel {
                 break;
             case 'deleteCheckpoint':
                 await this.deleteCheckpoint(message.checkpointId);
+                break;
+            case 'toggleMultiModelReview':
+                await setEnableMultiModelReview(message.enabled);
+                if (this.agentEngine) {
+                    this.agentEngine.updateContext({
+                        enableMultiModelReview: message.enabled,
+                        reviewerModel: getReviewerModel() || getSelectedModel(),
+                        criticModel: getCriticModel() || getSelectedModel(),
+                    });
+                }
+                break;
+            case 'selectReviewerModel':
+                await setReviewerModel(message.model);
+                if (this.agentEngine) {
+                    this.agentEngine.updateContext({
+                        reviewerModel: message.model || getSelectedModel(),
+                    });
+                }
+                break;
+            case 'selectCriticModel':
+                await setCriticModel(message.model);
+                if (this.agentEngine) {
+                    this.agentEngine.updateContext({
+                        criticModel: message.model || getSelectedModel(),
+                    });
+                }
                 break;
         }
     }
@@ -417,6 +449,9 @@ export class ChatPanel {
             command: 'updateModels',
             models: models,
             selected: selected,
+            enableMultiModelReview: getEnableMultiModelReview(),
+            reviewerModel: getReviewerModel(),
+            criticModel: getCriticModel(),
         });
     }
 

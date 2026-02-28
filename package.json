@@ -71,6 +71,31 @@
           "type": "boolean",
           "default": false,
           "description": "Enable checkpoint feature. Checkpoints automatically save workspace state before each step in Agent mode, allowing you to restore to previous states."
+        },
+        "tokamak.enableMultiModelReview": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable multi-model review. When enabled, a separate Reviewer model reviews code in Agent mode and a Critic model challenges plans in Plan mode."
+        },
+        "tokamak.reviewerModel": {
+          "type": "string",
+          "default": "",
+          "description": "Model for code review in Agent mode (empty = same as main model)"
+        },
+        "tokamak.criticModel": {
+          "type": "string",
+          "default": "",
+          "description": "Model for plan critique in Plan mode (empty = same as main model)"
+        },
+        "tokamak.maxReviewIterations": {
+          "type": "number",
+          "default": 3,
+          "description": "Maximum review-fix cycles in Agent mode"
+        },
+        "tokamak.maxDebateIterations": {
+          "type": "number",
+          "default": 2,
+          "description": "Maximum plan debate rounds in Plan mode"
         }
       }
     },

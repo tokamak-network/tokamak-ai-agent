@@ -121,3 +121,32 @@ export function helper() {
             return '';
     }
 }
+
+export function getReviewerSystemPrompt(): string {
+    return `You are a senior code reviewer. Analyze the code changes below and respond with ONLY a JSON object.
+Focus on: correctness, security vulnerabilities, performance issues, edge cases, code style.
+
+Response format:
+{ "verdict": "PASS" | "NEEDS_FIX", "summary": "brief overall assessment", "issues": [{ "severity": "critical"|"major"|"minor", "description": "what is wrong", "suggestion": "how to fix it" }] }
+
+Rules:
+- verdict = "PASS" only when no critical or major issues remain
+- Be specific: cite line numbers and code snippets when possible
+- Provide actionable suggestions for each issue
+- If the code is correct and well-written, return verdict "PASS" with an empty issues array
+- Respond with ONLY the JSON object, no additional text`;
+}
+
+export function getCriticSystemPrompt(): string {
+    return `You are a software architecture critic. Evaluate the development plan below and respond with ONLY a JSON object.
+Focus on: feasibility, missing edge cases, alternative approaches, risks, dependencies.
+
+Response format:
+{ "verdict": "APPROVE" | "CHALLENGE", "concerns": ["concern 1", "concern 2"], "suggestions": ["suggestion 1", "suggestion 2"] }
+
+Rules:
+- verdict = "APPROVE" only when the plan is sound and complete
+- Be constructive: each concern should be paired with a concrete suggestion
+- If the plan is solid, return verdict "APPROVE" with empty arrays
+- Respond with ONLY the JSON object, no additional text`;
+}

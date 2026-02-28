@@ -184,13 +184,15 @@ export async function chatCompletion(messages: ChatMessage[]): Promise<string> {
 
 export function streamChatCompletion(
     messages: ChatMessage[],
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    overrideModel?: string
 ): StreamResult {
     const client   = getClient();
     const settings = getSettings();
+    const model = overrideModel || settings.selectedModel;
 
     // Vision 미지원 모델이면 image_url 파트를 텍스트 안내로 대체
-    const processedMessages = isVisionCapable(settings.selectedModel)
+    const processedMessages = isVisionCapable(model)
         ? messages
         : stripImagesForNonVisionModel(messages);
 
@@ -201,7 +203,7 @@ export function streamChatCompletion(
 
     const contentGenerator = async function* () {
         // stream_options는 OpenAI 공식 모델만 지원
-        const extraOptions = supportsStreamOptions(settings.selectedModel)
+        const extraOptions = supportsStreamOptions(model)
             ? { stream_options: { include_usage: true } }
             : {};
 
@@ -209,7 +211,7 @@ export function streamChatCompletion(
         const stream = await withRetry(() =>
             client.chat.completions.create(
                 {
-                    model: settings.selectedModel,
+                    model: model,
                     messages: processedMessages as any,
                     stream: true,
                     ...extraOptions,

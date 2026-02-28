@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { AgentState, AgentContext, PlanStep } from './types.js';
+import { AgentState, AgentContext, PlanStep, ReviewFeedback, DebateFeedback } from './types.js';
 import { Planner } from './planner.js';
 import { Executor } from './executor.js';
 import { Observer, DiagnosticInfo } from './observer.js';
@@ -8,7 +8,8 @@ import { ContextManager } from './contextManager.js';
 import { DependencyAnalyzer } from './dependencyAnalyzer.js';
 import { CheckpointManager, Checkpoint } from './checkpointManager.js';
 import { streamChatCompletion, ChatMessage } from '../api/client.js';
-import { isCheckpointsEnabled } from '../config/settings.js';
+import { isCheckpointsEnabled, getSettings as getConfigSettings } from '../config/settings.js';
+import { getReviewerSystemPrompt, getCriticSystemPrompt } from '../chat/systemPromptBuilder.js';
 import { logger } from '../utils/logger.js';
 import { stripThinkingBlocks } from '../utils/contentUtils.js';
 
@@ -59,6 +60,8 @@ export class AgentEngine {
     private fixAttempts: Map<string, number> = new Map();
     /** Cline의 consecutiveMistakeCount 패턴: 연속 실패 횟수 추적. 성공 시 0으로 리셋. */
     private consecutiveMistakeCount: number = 0;
+    private reviewIterations: number = 0;
+    private debateIterations: number = 0;
     private planner: Planner = new Planner();
     private executor: Executor = new Executor();
     private observer: Observer = new Observer();
@@ -145,6 +148,12 @@ export class AgentEngine {
                     case 'Fixing':
                         await this.handleFixing();
                         break;
+                    case 'Reviewing':
+                        await this.handleReview();
+                        break;
+                    case 'Debating':
+                        await this.handleDebate();
+                        break;
                     default:
                         await this.transitionTo('Idle');
                         return;
@@ -206,7 +215,12 @@ ${globalContext}
 
             if (this.plan.length > 0) {
                 this.notifyPlanChange();
-                await this.transitionTo('Executing');
+                // Multi-model debate: route to Debating if enabled
+                if (this.context.enableMultiModelReview && this.context.criticModel) {
+                    await this.transitionTo('Debating');
+                } else {
+                    await this.transitionTo('Executing');
+                }
             } else {
                 logger.warn('[AgentEngine]', 'No plan extracted after retry.');
                 await this.transitionTo('Done');
@@ -438,7 +452,12 @@ ${directFileContext}
             const isCleanSuccess = /successfully|success|created|updated|wrote/i.test(resultText);
             if (isCleanSuccess) {
                 logger.info('[AgentEngine]', 'Clean execution, no errors — skipping Reflection');
-                await this.transitionTo('Executing');
+                // Multi-model review: route to Reviewing if enabled
+                if (this.context.enableMultiModelReview && this.context.reviewerModel) {
+                    await this.transitionTo('Reviewing');
+                } else {
+                    await this.transitionTo('Executing');
+                }
             } else {
                 await this.transitionTo('Reflecting');
             }
@@ -598,6 +617,202 @@ ${fileContext}${searchReplaceHint}
         }
     }
 
+    /**
+     * Multi-model review: Reviewer 모델이 현재 step의 코드 변경을 리뷰합니다.
+     * PASS → 다음 step, NEEDS_FIX → Fixing 상태로 전환하여 수정 루프
+     */
+    private async handleReview(): Promise<void> {
+        const maxIter = this.context.maxReviewIterations ?? 3;
+        this.reviewIterations++;
+
+        if (this.reviewIterations > maxIter) {
+            logger.info('[AgentEngine]', `Review iterations exceeded max (${maxIter}), proceeding`);
+            this.reviewIterations = 0;
+            await this.transitionTo('Executing');
+            return;
+        }
+
+        const step = this.plan[this.currentStepIndex];
+        if (!step) {
+            this.reviewIterations = 0;
+            await this.transitionTo('Executing');
+            return;
+        }
+
+        if (this.context.onMessage) {
+            this.context.onMessage('assistant', `🔍 **Reviewing** (round ${this.reviewIterations}/${maxIter})...`);
+        }
+
+        try {
+            const reviewPrompt = `Review the following code change:
+
+**Step**: ${step.description}
+**Action**: ${step.action ?? '(no action recorded)'}
+**Result**: ${step.result ?? '(no result)'}
+
+Provide your review as a JSON object.`;
+
+            const reviewResponse = await this.streamWithUI(
+                [{ role: 'user', content: reviewPrompt }],
+                this.context.reviewerModel,
+                getReviewerSystemPrompt()
+            );
+
+            const feedback = this.parseReviewFeedback(reviewResponse);
+
+            if (feedback && feedback.verdict === 'PASS') {
+                logger.info('[AgentEngine]', 'Review: PASS');
+                if (this.context.onMessage) {
+                    this.context.onMessage('assistant', `✅ **Review PASSED**: ${feedback.summary}`);
+                }
+                this.reviewIterations = 0;
+                await this.transitionTo('Executing');
+            } else if (feedback && feedback.verdict === 'NEEDS_FIX') {
+                logger.info('[AgentEngine]', `Review: NEEDS_FIX — ${feedback.issues.length} issue(s)`);
+                const issueList = feedback.issues.map(i => `- **[${i.severity}]** ${i.description}${i.suggestion ? ` → ${i.suggestion}` : ''}`).join('\n');
+                if (this.context.onMessage) {
+                    this.context.onMessage('assistant', `❌ **Review NEEDS_FIX**: ${feedback.summary}\n${issueList}`);
+                }
+                // Store feedback in step result for the Fixing handler
+                step.status = 'failed';
+                step.result = `[Review NEEDS_FIX] ${feedback.summary}\n${issueList}`;
+                this.notifyPlanChange();
+                await this.transitionTo('Fixing');
+            } else {
+                // Could not parse feedback — proceed anyway
+                logger.warn('[AgentEngine]', 'Review: Could not parse feedback, proceeding');
+                this.reviewIterations = 0;
+                await this.transitionTo('Executing');
+            }
+        } catch (error) {
+            logger.error('[AgentEngine]', 'Review failed', error);
+            this.reviewIterations = 0;
+            await this.transitionTo('Executing');
+        }
+    }
+
+    /**
+     * Multi-model debate: Critic 모델이 플랜을 비평합니다.
+     * APPROVE → Executing, CHALLENGE → Planner가 플랜 수정 후 다시 Debating
+     */
+    private async handleDebate(): Promise<void> {
+        const maxIter = this.context.maxDebateIterations ?? 2;
+        this.debateIterations++;
+
+        if (this.debateIterations > maxIter) {
+            logger.info('[AgentEngine]', `Debate iterations exceeded max (${maxIter}), proceeding`);
+            this.debateIterations = 0;
+            await this.transitionTo('Executing');
+            return;
+        }
+
+        if (this.context.onMessage) {
+            this.context.onMessage('assistant', `💬 **Debating plan** (round ${this.debateIterations}/${maxIter})...`);
+        }
+
+        try {
+            const planSummary = this.plan.map((s, i) => `${i + 1}. ${s.description}`).join('\n');
+            const debatePrompt = `Evaluate the following development plan:
+
+**User request**: ${this.context.userInput}
+
+**Plan**:
+${planSummary}
+
+Provide your critique as a JSON object.`;
+
+            const debateResponse = await this.streamWithUI(
+                [{ role: 'user', content: debatePrompt }],
+                this.context.criticModel,
+                getCriticSystemPrompt()
+            );
+
+            const feedback = this.parseDebateFeedback(debateResponse);
+
+            if (feedback && feedback.verdict === 'APPROVE') {
+                logger.info('[AgentEngine]', 'Debate: APPROVE');
+                if (this.context.onMessage) {
+                    this.context.onMessage('assistant', `✅ **Plan APPROVED** by critic`);
+                }
+                this.debateIterations = 0;
+                await this.transitionTo('Executing');
+            } else if (feedback && feedback.verdict === 'CHALLENGE') {
+                logger.info('[AgentEngine]', `Debate: CHALLENGE — ${feedback.concerns.length} concern(s)`);
+                const concernList = feedback.concerns.map(c => `- ${c}`).join('\n');
+                const suggestionList = feedback.suggestions.map(s => `- ${s}`).join('\n');
+                if (this.context.onMessage) {
+                    this.context.onMessage('assistant', `⚠️ **Plan CHALLENGED**:\n**Concerns:**\n${concernList}\n**Suggestions:**\n${suggestionList}`);
+                }
+
+                // Ask Planner to revise the plan with critic feedback
+                const revisePrompt = `The plan critic has challenged your plan with these concerns:
+${concernList}
+
+And these suggestions:
+${suggestionList}
+
+Please revise the plan. Output ONLY a markdown checklist (- [ ] ...) with the revised steps.
+Original user request: ${this.context.userInput}`;
+
+                const revisedResponse = await this.streamWithUI([{ role: 'user', content: revisePrompt }]);
+                const revisedPlan = this.planner.parsePlan(revisedResponse);
+
+                if (revisedPlan.length > 0) {
+                    this.plan = revisedPlan;
+                    this.notifyPlanChange();
+                }
+
+                // Loop back to Debating for another round
+                await this.transitionTo('Debating');
+            } else {
+                // Could not parse feedback — proceed anyway
+                logger.warn('[AgentEngine]', 'Debate: Could not parse feedback, proceeding');
+                this.debateIterations = 0;
+                await this.transitionTo('Executing');
+            }
+        } catch (error) {
+            logger.error('[AgentEngine]', 'Debate failed', error);
+            this.debateIterations = 0;
+            await this.transitionTo('Executing');
+        }
+    }
+
+    private parseReviewFeedback(response: string): ReviewFeedback | null {
+        const jsonStr = extractJsonFromText(response);
+        if (!jsonStr) return null;
+        try {
+            const parsed = JSON.parse(jsonStr);
+            if (parsed.verdict === 'PASS' || parsed.verdict === 'NEEDS_FIX') {
+                return {
+                    verdict: parsed.verdict,
+                    summary: parsed.summary || '',
+                    issues: Array.isArray(parsed.issues) ? parsed.issues : [],
+                };
+            }
+        } catch {
+            logger.warn('[AgentEngine]', 'Failed to parse review feedback JSON');
+        }
+        return null;
+    }
+
+    private parseDebateFeedback(response: string): DebateFeedback | null {
+        const jsonStr = extractJsonFromText(response);
+        if (!jsonStr) return null;
+        try {
+            const parsed = JSON.parse(jsonStr);
+            if (parsed.verdict === 'APPROVE' || parsed.verdict === 'CHALLENGE') {
+                return {
+                    verdict: parsed.verdict,
+                    concerns: Array.isArray(parsed.concerns) ? parsed.concerns : [],
+                    suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions : [],
+                };
+            }
+        } catch {
+            logger.warn('[AgentEngine]', 'Failed to parse debate feedback JSON');
+        }
+        return null;
+    }
+
     /** 에이전트 역할, 도구 사용 규칙, 코드 품질 기준을 AI에게 지정하는 System Prompt */
     private static readonly SYSTEM_PROMPT = `You are an expert AI coding agent integrated into a VS Code extension. Your role is to autonomously plan and execute software engineering tasks by writing, reading, and modifying files.
 
@@ -632,10 +847,15 @@ ${fileContext}${searchReplaceHint}
      * - context.abortSignal이 설정되어 있으면 스트리밍을 조기 종료합니다 (Stop 버튼 지원).
      * - Qwen3 등의 <think>...</think> 블록을 제거한 후 반환합니다.
      */
-    private async streamWithUI(messages: ChatMessage[]): Promise<string> {
+    private async streamWithUI(
+        messages: ChatMessage[],
+        overrideModel?: string,
+        overrideSystemPrompt?: string
+    ): Promise<string> {
         if (this.context.onStreamStart) this.context.onStreamStart();
 
-        const systemMessage: ChatMessage = { role: 'system', content: AgentEngine.SYSTEM_PROMPT };
+        const systemContent = overrideSystemPrompt ?? AgentEngine.SYSTEM_PROMPT;
+        const systemMessage: ChatMessage = { role: 'system', content: systemContent };
         const fullMessages = [systemMessage, ...messages];
 
         let aiResponse = '';
@@ -645,7 +865,7 @@ ${fileContext}${searchReplaceHint}
         const OPEN_RE  = /<think>|\[TOOL_CALL\]/i;
         const CLOSE_RE = /<\/think>|<\/thinking>|\[\/TOOL_CALL\]/i;
 
-        const streamResult = streamChatCompletion(fullMessages, this.context.abortSignal);
+        const streamResult = streamChatCompletion(fullMessages, this.context.abortSignal, overrideModel);
         for await (const chunk of streamResult.content) {
             if (this.context.abortSignal?.aborted) break;
             aiResponse += chunk;
@@ -697,6 +917,8 @@ ${fileContext}${searchReplaceHint}
         this.currentStepIndex = -1;
         this.fixAttempts.clear();
         this.consecutiveMistakeCount = 0;
+        this.reviewIterations = 0;
+        this.debateIterations = 0;
         this.lastDiagnostics = [];
     }
 

@@ -804,6 +804,72 @@ export function getHtmlContent(): string {
         .checkpoint-btn.delete {
             color: var(--vscode-errorForeground);
         }
+        /* Multi-model review UI */
+        .multi-model-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 0;
+            font-size: 0.82em;
+        }
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 32px;
+            height: 18px;
+        }
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            inset: 0;
+            background-color: var(--vscode-input-border);
+            border-radius: 18px;
+            transition: 0.2s;
+        }
+        .toggle-slider:before {
+            content: "";
+            position: absolute;
+            height: 12px;
+            width: 12px;
+            left: 3px;
+            bottom: 3px;
+            background-color: var(--vscode-foreground);
+            border-radius: 50%;
+            transition: 0.2s;
+        }
+        .toggle-switch input:checked + .toggle-slider {
+            background-color: var(--vscode-button-background);
+        }
+        .toggle-switch input:checked + .toggle-slider:before {
+            transform: translateX(14px);
+        }
+        .role-model-select {
+            display: none;
+            align-items: center;
+            gap: 4px;
+        }
+        .role-model-select.visible {
+            display: flex;
+        }
+        .role-model-select label {
+            font-size: 0.8em;
+            opacity: 0.7;
+            white-space: nowrap;
+        }
+        .role-model-select select {
+            padding: 2px 6px;
+            border: 1px solid var(--vscode-input-border);
+            background-color: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border-radius: 4px;
+            font-family: inherit;
+            font-size: 0.85em;
+        }
     </style>
 </head>
 <body>
@@ -826,7 +892,24 @@ export function getHtmlContent(): string {
             <div style="flex:1"></div>
             <label for="model-select" style="font-size: 0.8em; opacity: 0.7;">Model: </label>
             <select id="model-select"></select>
+            <div class="multi-model-row">
+                <label class="toggle-switch" title="Multi-Model Review">
+                    <input type="checkbox" id="enableMultiModel">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span style="opacity:0.7;">Review</span>
+            </div>
             <button id="new-chat-btn" title="Start new conversation">+ New</button>
+        </div>
+        <div class="multi-model-row" style="padding: 0 15px 4px;">
+            <div class="role-model-select" id="reviewer-select-container">
+                <label for="reviewer-model-select">Reviewer:</label>
+                <select id="reviewer-model-select"></select>
+            </div>
+            <div class="role-model-select" id="critic-select-container">
+                <label for="critic-model-select">Critic:</label>
+                <select id="critic-model-select"></select>
+            </div>
         </div>
         <div id="mode-tabs">
             <button class="mode-tab active" data-mode="ask">💬 Ask</button>
@@ -917,6 +1000,12 @@ export function getHtmlContent(): string {
             const checkpointsPanel = document.getElementById('checkpoints-panel');
             const checkpointsList = document.getElementById('checkpoints-list');
             const refreshCheckpointsBtn = document.getElementById('refresh-checkpoints');
+            const enableMultiModelCheckbox = document.getElementById('enableMultiModel');
+            const reviewerSelectContainer = document.getElementById('reviewer-select-container');
+            const criticSelectContainer = document.getElementById('critic-select-container');
+            const reviewerModelSelect = document.getElementById('reviewer-model-select');
+            const criticModelSelect = document.getElementById('critic-model-select');
+            let multiModelEnabled = false;
 
             let currentStreamingMessage = null;
             let streamingContent = '';
@@ -1278,7 +1367,7 @@ export function getHtmlContent(): string {
             }, 100);
             }
 
-            function updateModels(models, selected) {
+            function updateModels(models, selected, enableMultiModel, reviewerModel, criticModel) {
             modelSelect.innerHTML = '';
             models.forEach(model => {
             const option = document.createElement('option');
@@ -1289,6 +1378,26 @@ export function getHtmlContent(): string {
             }
             modelSelect.appendChild(option);
             });
+
+            // Update role model dropdowns
+            [reviewerModelSelect, criticModelSelect].forEach(sel => {
+            sel.innerHTML = '<option value="">(Same as main model)</option>';
+            models.forEach(model => {
+            const option = document.createElement('option');
+            option.value = model;
+            option.textContent = model;
+            sel.appendChild(option);
+            });
+            });
+            if (reviewerModel) reviewerModelSelect.value = reviewerModel;
+            if (criticModel) criticModelSelect.value = criticModel;
+
+            // Update toggle state
+            if (enableMultiModel !== undefined) {
+            multiModelEnabled = enableMultiModel;
+            enableMultiModelCheckbox.checked = enableMultiModel;
+            updateRoleModelVisibility();
+            }
             }
 
             function showOperations(operations) {
@@ -1430,6 +1539,33 @@ export function getHtmlContent(): string {
             vscode.postMessage({ command: 'selectModel', model: modelSelect.value });
             });
 
+            enableMultiModelCheckbox.addEventListener('change', () => {
+            multiModelEnabled = enableMultiModelCheckbox.checked;
+            vscode.postMessage({ command: 'toggleMultiModelReview', enabled: multiModelEnabled });
+            updateRoleModelVisibility();
+            });
+
+            reviewerModelSelect.addEventListener('change', () => {
+            vscode.postMessage({ command: 'selectReviewerModel', model: reviewerModelSelect.value });
+            });
+
+            criticModelSelect.addEventListener('change', () => {
+            vscode.postMessage({ command: 'selectCriticModel', model: criticModelSelect.value });
+            });
+
+            function updateRoleModelVisibility() {
+            if (multiModelEnabled && (currentMode === 'agent')) {
+            reviewerSelectContainer.classList.add('visible');
+            } else {
+            reviewerSelectContainer.classList.remove('visible');
+            }
+            if (multiModelEnabled && (currentMode === 'plan')) {
+            criticSelectContainer.classList.add('visible');
+            } else {
+            criticSelectContainer.classList.remove('visible');
+            }
+            }
+
             sendBtn.addEventListener('click', sendMessage);
 
             stopBtn.addEventListener('click', () => {
@@ -1567,7 +1703,7 @@ export function getHtmlContent(): string {
             tokenDetail.textContent = \`(Prompt: \${sessionPromptTokens.toLocaleString()} | Completion: \${sessionCompletionTokens.toLocaleString()})\`;
             break;
             case 'updateModels':
-            updateModels(message.models, message.selected);
+            updateModels(message.models, message.selected, message.enableMultiModelReview, message.reviewerModel, message.criticModel);
             break;
             case 'fileSearchResults':
             showAutocomplete(message.files);
@@ -1579,7 +1715,8 @@ export function getHtmlContent(): string {
             });
             modeDescription.textContent = modeDescriptions[currentMode];
             messageInput.placeholder = modePlaceholders[currentMode];
-            
+            updateRoleModelVisibility();
+
             // Agent 모드이고 checkpoint 기능이 활성화된 경우에만 체크포인트 패널 표시 및 로드
             const checkpointsEnabled = message.checkpointsEnabled !== undefined ? message.checkpointsEnabled : false;
             if (currentMode === 'agent' && checkpointsEnabled) {
@@ -1636,6 +1773,17 @@ export function getHtmlContent(): string {
 
             function updateAgentStatusUI(state) {
             agentStatusBadge.textContent = state;
+            // Color-code special states
+            if (state === 'Reviewing') {
+            agentStatusBadge.style.backgroundColor = '#7c3aed';
+            agentStatusBadge.style.color = '#fff';
+            } else if (state === 'Debating') {
+            agentStatusBadge.style.backgroundColor = '#d97706';
+            agentStatusBadge.style.color = '#fff';
+            } else {
+            agentStatusBadge.style.backgroundColor = '';
+            agentStatusBadge.style.color = '';
+            }
             // Plan Panel은 Plan 모드일 때만 표시 (Agent 모드에서 자동 Plan 생성 방지)
             if (currentMode === 'plan' && state !== 'Idle' && state !== 'Done' && state !== 'Error') {
             planPanel.classList.add('visible');

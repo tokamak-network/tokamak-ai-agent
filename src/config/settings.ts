@@ -11,6 +11,11 @@ export interface TokamakSettings {
     enableInlineCompletion: boolean;
     completionDebounceMs: number;
     enableCheckpoints: boolean;
+    enableMultiModelReview: boolean;
+    reviewerModel: string;
+    criticModel: string;
+    maxReviewIterations: number;
+    maxDebateIterations: number;
 }
 
 export function setSettingsContext(context: vscode.ExtensionContext): void {
@@ -31,6 +36,11 @@ export function getSettings(): TokamakSettings {
         enableInlineCompletion: config.get<boolean>('enableInlineCompletion', true),
         completionDebounceMs: config.get<number>('completionDebounceMs', 300),
         enableCheckpoints: config.get<boolean>('enableCheckpoints', false),
+        enableMultiModelReview: config.get<boolean>('enableMultiModelReview', false),
+        reviewerModel: config.get<string>('reviewerModel', ''),
+        criticModel: config.get<string>('criticModel', ''),
+        maxReviewIterations: config.get<number>('maxReviewIterations', 3),
+        maxDebateIterations: config.get<number>('maxDebateIterations', 2),
     };
 }
 
@@ -44,6 +54,38 @@ export function getAvailableModels(): string[] {
 
 export async function setSelectedModel(model: string): Promise<void> {
     await vscode.workspace.getConfiguration('tokamak').update('selectedModel', model, true);
+}
+
+export function getEnableMultiModelReview(): boolean {
+    return getSettings().enableMultiModelReview;
+}
+
+export async function setEnableMultiModelReview(enabled: boolean): Promise<void> {
+    await vscode.workspace.getConfiguration('tokamak').update('enableMultiModelReview', enabled, true);
+}
+
+export function getReviewerModel(): string {
+    return getSettings().reviewerModel;
+}
+
+export async function setReviewerModel(model: string): Promise<void> {
+    await vscode.workspace.getConfiguration('tokamak').update('reviewerModel', model, true);
+}
+
+export function getCriticModel(): string {
+    return getSettings().criticModel;
+}
+
+export async function setCriticModel(model: string): Promise<void> {
+    await vscode.workspace.getConfiguration('tokamak').update('criticModel', model, true);
+}
+
+export function getMaxReviewIterations(): number {
+    return getSettings().maxReviewIterations;
+}
+
+export function getMaxDebateIterations(): number {
+    return getSettings().maxDebateIterations;
 }
 
 export function isConfigured(): boolean {
