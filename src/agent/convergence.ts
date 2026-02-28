@@ -1,7 +1,11 @@
 import { DiscussionRound, ConvergenceMetrics } from './types.js';
 
-const AGREEMENT_PATTERNS = /\b(agree|concede|valid point|correct|accept|fair|acknowledged|good point|well taken|right)\b/gi;
-const DISAGREEMENT_PATTERNS = /\b(disagree|however|incorrect|but|challenge|oppose|flaw|problematic|issue|concern|wrong)\b/gi;
+// 어간(stem) 기반 매칭: \bagree 는 agree, agreement, agreed, agreeable 모두 매칭
+const AGREEMENT_PATTERNS = /\b(agree|concede|conceded|valid|correct|accept|fair|acknowledg|good point|well taken|well-taken|right|sound|solid|reasonable)\w*/gi;
+const DISAGREEMENT_PATTERNS = /\b(disagree|however|incorrect|challeng|oppos|flaw|problematic|issue|concern|wrong|risk|vulnerab|missing|oversight|gap)\w*/gi;
+
+// 구조화 프롬프트에서 나오는 섹션 헤더는 제외 (키워드 카운트 왜곡 방지)
+const SECTION_HEADER_RE = /^#+\s+.+$/gm;
 
 /**
  * Detect agreement ratio from text based on agreement/disagreement keyword patterns.
@@ -9,8 +13,10 @@ const DISAGREEMENT_PATTERNS = /\b(disagree|however|incorrect|but|challenge|oppos
  * Returns 0.5 if no patterns found.
  */
 export function detectAgreementRatio(text: string): number {
-    const agreements = (text.match(AGREEMENT_PATTERNS) || []).length;
-    const disagreements = (text.match(DISAGREEMENT_PATTERNS) || []).length;
+    // 섹션 헤더 제거 (## Points of Agreement 같은 것이 키워드 카운트를 왜곡)
+    const cleaned = text.replace(SECTION_HEADER_RE, '');
+    const agreements = (cleaned.match(AGREEMENT_PATTERNS) || []).length;
+    const disagreements = (cleaned.match(DISAGREEMENT_PATTERNS) || []).length;
     const total = agreements + disagreements;
     if (total === 0) return 0.5;
     return agreements / total;
@@ -39,13 +45,13 @@ export function jaccardSimilarity(a: string, b: string): number {
 
 /**
  * Compute convergence metrics from discussion rounds.
- * - agreementRatio: average agreement ratio across all rounds
- * - avgStability: average Jaccard similarity between consecutive rounds
- * - overallScore: (agreementRatio * 0.6) + (avgStability * 0.4)
- * - recommendation:
- *   - converged: agreementRatio >= 0.7 AND avgStability >= 0.8
- *   - stalled: rounds >= 2 AND avgStability < 0.3
- *   - continue: otherwise
+ *
+ * Stability는 같은 역할끼리 비교합니다 (critique1↔critique2, rebuttal1↔rebuttal2).
+ * Critique↔Rebuttal은 당연히 어휘가 다르므로, 연속 라운드 비교는 오탐을 유발합니다.
+ *
+ * - converged: agreementRatio >= 0.6 AND avgStability >= 0.7
+ * - stalled: rounds >= 4 (최소 2 사이클) AND avgStability < 0.3
+ * - continue: otherwise
  */
 export function computeConvergence(rounds: DiscussionRound[]): ConvergenceMetrics {
     if (rounds.length === 0) {
@@ -61,21 +67,32 @@ export function computeConvergence(rounds: DiscussionRound[]): ConvergenceMetric
     const ratios = rounds.map(r => detectAgreementRatio(r.content));
     const agreementRatio = ratios.reduce((sum, r) => sum + r, 0) / ratios.length;
 
-    // Stability: average Jaccard similarity between consecutive rounds
+    // Stability: 같은 역할끼리 비교 (critique↔critique, rebuttal↔rebuttal 등)
+    // 역할별로 라운드를 그룹화
+    const byRole = new Map<string, DiscussionRound[]>();
+    for (const r of rounds) {
+        const existing = byRole.get(r.role) || [];
+        existing.push(r);
+        byRole.set(r.role, existing);
+    }
+
     let stabilitySum = 0;
     let stabilityCount = 0;
-    for (let i = 1; i < rounds.length; i++) {
-        stabilitySum += jaccardSimilarity(rounds[i - 1].content, rounds[i].content);
-        stabilityCount++;
+    for (const roleRounds of byRole.values()) {
+        for (let i = 1; i < roleRounds.length; i++) {
+            stabilitySum += jaccardSimilarity(roleRounds[i - 1].content, roleRounds[i].content);
+            stabilityCount++;
+        }
     }
     const avgStability = stabilityCount > 0 ? stabilitySum / stabilityCount : 0;
 
     const overallScore = (agreementRatio * 0.6) + (avgStability * 0.4);
 
     let recommendation: ConvergenceMetrics['recommendation'] = 'continue';
-    if (agreementRatio >= 0.7 && avgStability >= 0.8) {
+    if (agreementRatio >= 0.6 && avgStability >= 0.7) {
         recommendation = 'converged';
-    } else if (rounds.length >= 2 && avgStability < 0.3) {
+    } else if (rounds.length >= 4 && avgStability < 0.3) {
+        // 최소 2 사이클(4 라운드) 이후에만 stalled 판정
         recommendation = 'stalled';
     }
 

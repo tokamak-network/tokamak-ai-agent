@@ -70,6 +70,8 @@ export class AgentEngine {
     private debateIterations: number = 0;
     private reviewSession: ReviewSessionState | null = null;
     private debateSession: DebateSessionState | null = null;
+    /** 리뷰 완료된 step ID — 동일 step 재리뷰 방지 (무한루프 차단) */
+    private reviewedStepIds: Set<string> = new Set();
     private planner: Planner = new Planner();
     private executor: Executor = new Executor();
     private observer: Observer = new Observer();
@@ -469,8 +471,9 @@ ${directFileContext}
             const isCleanSuccess = /successfully|success|created|updated|wrote/i.test(resultText);
             if (isCleanSuccess) {
                 logger.info('[AgentEngine]', 'Clean execution, no errors — skipping Reflection');
-                // Multi-model review: route to Reviewing if enabled
-                if (this.context.enableMultiModelReview && this.context.reviewerModel) {
+                // Multi-model review: route to Reviewing if enabled (이미 리뷰한 step은 제외)
+                const alreadyReviewed = currentStep && this.reviewedStepIds.has(currentStep.id);
+                if (this.context.enableMultiModelReview && this.context.reviewerModel && !alreadyReviewed) {
                     await this.transitionTo('Reviewing');
                 } else {
                     await this.transitionTo('Executing');
@@ -971,6 +974,8 @@ ${fileContext}${searchReplaceHint}
         const step = this.plan[this.currentStepIndex];
 
         if (decision === 'apply_fix' && step && feedback) {
+            // 이 step을 리뷰 완료로 표시 — Fixing → Observing 후 재리뷰 방지
+            this.reviewedStepIds.add(step.id);
             // Transition to Fixing with review feedback
             const issueList = feedback.issues.map(i => `- **[${i.severity}]** ${i.description}${i.suggestion ? ` → ${i.suggestion}` : ''}`).join('\n');
             step.status = 'failed';
@@ -1224,6 +1229,7 @@ ${fileContext}${searchReplaceHint}
         this.debateIterations = 0;
         this.reviewSession = null;
         this.debateSession = null;
+        this.reviewedStepIds.clear();
         this.lastDiagnostics = [];
     }
 

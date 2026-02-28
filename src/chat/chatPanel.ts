@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import { streamChatCompletion, ChatMessage, isVisionCapable } from '../api/client.js';
-import { isConfigured, promptForConfiguration, getAvailableModels, getSelectedModel, setSelectedModel, isCheckpointsEnabled, getEnableMultiModelReview, setEnableMultiModelReview, getReviewerModel, setReviewerModel, getCriticModel, setCriticModel, getMaxReviewIterations, getMaxDebateIterations } from '../config/settings.js';
+import { isConfigured, promptForConfiguration, getAvailableModels, getSelectedModel, setSelectedModel, isCheckpointsEnabled, getEnableMultiModelReview, setEnableMultiModelReview, getReviewerModel, setReviewerModel, getCriticModel, setCriticModel, getMaxReviewIterations, getMaxDebateIterations, getAgentStrategy, setAgentStrategy, getPlanStrategy, setPlanStrategy } from '../config/settings.js';
 import { AgentEngine } from '../agent/engine.js';
-import { AgentContext } from '../agent/types.js';
+import { AgentContext, AgentStrategy, PlanStrategy } from '../agent/types.js';
 import {
     removeAutoExecutionCode,
     removeTrailingBackticks,
@@ -39,6 +39,9 @@ export class ChatPanel {
     private pendingOperations: FileOperation[] = [];
     private currentAbortController: AbortController | null = null;
     private agentEngine: AgentEngine | undefined;
+    /** 마지막 리뷰/비평 결과 저장 — Apply Fix / Revise Plan 시 채팅에 전달 */
+    private lastReviewSynthesis: string = '';
+    private lastDebateSynthesis: string = '';
 
     public static setContext(context: vscode.ExtensionContext): void {
         ChatPanel.extensionContext = context;
@@ -110,6 +113,40 @@ export class ChatPanel {
             criticModel: getCriticModel() || getSelectedModel(),
             maxReviewIterations: getMaxReviewIterations(),
             maxDebateIterations: getMaxDebateIterations(),
+            // Strategy selection
+            agentStrategy: getAgentStrategy(),
+            planStrategy: getPlanStrategy(),
+            // Multi-round review/debate callbacks
+            onReviewComplete: (feedback, rounds, convergence) => {
+                this.panel.webview.postMessage({
+                    command: 'showReviewResults',
+                    feedback,
+                    rounds,
+                    convergence,
+                });
+            },
+            onDebateComplete: (feedback, rounds, convergence) => {
+                // synthesis는 onSynthesisComplete에서 저장됨
+                this.panel.webview.postMessage({
+                    command: 'showDebateResults',
+                    feedback,
+                    rounds,
+                    convergence,
+                });
+            },
+            onSynthesisComplete: (synthesis) => {
+                // 마지막 synthesis 저장 (Apply Fix / Revise Plan 시 사용)
+                // Agent 모드 → review synthesis, Plan 모드 → debate synthesis
+                if (this.currentMode === 'agent') {
+                    this.lastReviewSynthesis = synthesis;
+                } else {
+                    this.lastDebateSynthesis = synthesis;
+                }
+                this.panel.webview.postMessage({
+                    command: 'showSynthesis',
+                    synthesis,
+                });
+            },
         };
         this.agentEngine = new AgentEngine(context);
     }
@@ -270,6 +307,46 @@ export class ChatPanel {
                     this.agentEngine.updateContext({
                         criticModel: message.model || getSelectedModel(),
                     });
+                }
+                break;
+            case 'reviewAction':
+                if (this.agentEngine) {
+                    if (message.decision === 'apply_fix') {
+                        // Agent 모드: 엔진의 Fixing 대신 리뷰 피드백을 채팅 메시지로 전달
+                        // 엔진은 skip으로 정상 종료
+                        this.agentEngine.resolveReviewDecision('skip');
+                        // 리뷰 피드백을 사용자 메시지로 주입 → AI가 새 FILE_OPERATION으로 수정
+                        const reviewFeedback = this.lastReviewSynthesis || 'Code review found issues that need fixing.';
+                        const fixPrompt = `The code review identified the following issues. Please fix them and provide corrected file operations:\n\n${reviewFeedback}`;
+                        this.handleUserMessage(fixPrompt, [], []);
+                    } else {
+                        this.agentEngine.resolveReviewDecision('skip');
+                    }
+                }
+                break;
+            case 'debateAction':
+                if (this.agentEngine) {
+                    if (message.decision === 'revise') {
+                        // Plan 모드: 엔진의 Planning 대신 비평 피드백을 채팅 메시지로 전달
+                        this.agentEngine.resolveDebateDecision('accept');
+                        const debateFeedback = this.lastDebateSynthesis || 'Plan debate found concerns that need addressing.';
+                        const revisePrompt = `The plan debate identified the following concerns. Please revise the plan:\n\n${debateFeedback}`;
+                        this.handleUserMessage(revisePrompt, [], []);
+                    } else {
+                        this.agentEngine.resolveDebateDecision('accept');
+                    }
+                }
+                break;
+            case 'selectAgentStrategy':
+                await setAgentStrategy(message.strategy);
+                if (this.agentEngine) {
+                    this.agentEngine.updateContext({ agentStrategy: message.strategy as AgentStrategy });
+                }
+                break;
+            case 'selectPlanStrategy':
+                await setPlanStrategy(message.strategy);
+                if (this.agentEngine) {
+                    this.agentEngine.updateContext({ planStrategy: message.strategy as PlanStrategy });
                 }
                 break;
         }
@@ -1165,6 +1242,24 @@ export class ChatPanel {
                 }
 
                 vscode.window.showInformationMessage(`Successfully applied and saved ${successCount} file operation(s).`);
+
+                // ── Multi-Model Review: Apply Changes 성공 후 리뷰 시작 ──
+                if (this.currentMode === 'agent' && this.agentEngine && getEnableMultiModelReview()) {
+                    const opDescriptions = this.pendingOperations.map(op =>
+                        `[${op.type}] ${op.path}${op.description ? ': ' + op.description : ''}`
+                    );
+                    const resultSummary = `Applied ${successCount} operation(s) successfully.`;
+
+                    // pendingOperations를 먼저 비우고, 리뷰 시작 (비동기 — UI 블록하지 않음)
+                    const savedOps = [...this.pendingOperations];
+                    this.pendingOperations = [];
+                    this.panel.webview.postMessage({ command: 'operationsCleared' });
+
+                    this.agentEngine.startReviewForOperations(opDescriptions, resultSummary).catch(err => {
+                        logger.error('[ChatPanel]', 'Review for operations failed', err);
+                    });
+                    return; // early return — pendingOperations 이미 비움
+                }
             }
         } else {
             logger.error('[ChatPanel]', 'WorkspaceEdit failed. Check for read-only files or conflicting edits.');
@@ -1683,9 +1778,13 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
 
                 // [Phase 1 통합] Plan 모드인 경우 AgentEngine에 전달
                 if (this.currentMode === 'plan' && this.agentEngine) {
-                    await this.agentEngine.setPlanFromResponse(fullResponse);
-                    // 자율 루프 시작 (현재는 플래닝 단계까지만 시뮬레이션)
-                    await this.agentEngine.run();
+                    this.agentEngine.setPlanForDisplay(fullResponse);
+                    // Multi-model debate가 활성화되어 있으면 debate 시작
+                    if (getEnableMultiModelReview() && this.agentEngine) {
+                        this.agentEngine.startDebateForPlan().catch(err => {
+                            logger.error('[ChatPanel]', 'Debate for plan failed', err);
+                        });
+                    }
                 }
 
                 // In agent or ask mode, parse file operations
