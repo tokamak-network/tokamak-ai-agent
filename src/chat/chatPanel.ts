@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { streamChatCompletion, ChatMessage, isVisionCapable } from '../api/client.js';
-import { isConfigured, promptForConfiguration, getAvailableModels, getSelectedModel, setSelectedModel, isCheckpointsEnabled, getEnableMultiModelReview, setEnableMultiModelReview, getReviewerModel, setReviewerModel, getCriticModel, setCriticModel, getMaxReviewIterations, getMaxDebateIterations, getAgentStrategy, setAgentStrategy, getPlanStrategy, setPlanStrategy } from '../config/settings.js';
+import { isConfigured, promptForConfiguration, getAvailableModels, getSelectedModel, setSelectedModel, isCheckpointsEnabled, getEnableMultiModelReview, setEnableMultiModelReview, getReviewerModel, setReviewerModel, getCriticModel, setCriticModel, getMaxReviewIterations, getMaxDebateIterations, getAgentStrategy, setAgentStrategy, getPlanStrategy, setPlanStrategy, getAutoApprovalConfig } from '../config/settings.js';
 import { AgentEngine } from '../agent/engine.js';
 import { AgentContext, AgentStrategy, PlanStrategy } from '../agent/types.js';
 import {
@@ -14,6 +14,19 @@ import { FileOperation, parseFileOperations } from './fileOperationParser.js';
 import { ChatMode, buildModePrompt, resolveHints, PromptContext } from '../prompts/index.js';
 import { SlashCommand, getAllSkills, filterSlashCommands, matchSlashCommand } from './skillsManager.js';
 import { getHtmlContent } from './webviewContent.js';
+import { needsCompression, compressMessages } from '../context/contextCompressor.js';
+import { shouldAutoApprove, classifyOperation } from '../approval/autoApproval.js';
+import { MentionProvider } from '../mentions/mentionProvider.js';
+import { RuleLoader } from '../rules/ruleLoader.js';
+import { getActiveRules, formatRulesForPrompt } from '../rules/ruleEvaluator.js';
+import { McpConfigManager } from '../mcp/mcpConfigManager.js';
+import { McpClient } from '../mcp/mcpClient.js';
+import { formatToolsForPrompt, parseMcpToolCalls, formatToolResult } from '../mcp/mcpToolAdapter.js';
+import { HookConfigLoader } from '../hooks/hookConfigLoader.js';
+import { HookRunner } from '../hooks/hookRunner.js';
+import { StreamingDiffParser } from '../streaming/streamingDiffParser.js';
+import { AutoCollector } from '../knowledge/autoCollector.js';
+import { getBrowserActionDocs } from '../browser/browserActions.js';
 
 
 interface ChatSession {
@@ -45,6 +58,16 @@ export class ChatPanel {
     /** Apply Fix 후 다음 Apply Changes에서 리뷰 재시작을 방지 */
     private skipNextReview: boolean = false;
 
+    // --- New subsystems ---
+    private mentionProvider: MentionProvider = new MentionProvider();
+    private ruleLoader: RuleLoader = new RuleLoader();
+    private mcpConfigManager: McpConfigManager = new McpConfigManager();
+    private mcpClients: Map<string, McpClient> = new Map();
+    private hookConfigLoader: HookConfigLoader = new HookConfigLoader();
+    private hookRunner: HookRunner = new HookRunner();
+    private streamingDiffParser: StreamingDiffParser = new StreamingDiffParser();
+    private autoCollector: AutoCollector = new AutoCollector();
+
     public static setContext(context: vscode.ExtensionContext): void {
         ChatPanel.extensionContext = context;
     }
@@ -67,6 +90,53 @@ export class ChatPanel {
         );
 
         this.initAgentEngine();
+        this.initSubsystems();
+    }
+
+    private initSubsystems(): void {
+        // Load rules
+        this.ruleLoader.loadRules().catch(err => {
+            logger.warn('[ChatPanel]', 'Failed to load rules', err);
+        });
+        this.ruleLoader.startWatching(() => {
+            this.ruleLoader.loadRules().catch(() => {});
+        });
+
+        // Load MCP config
+        this.mcpConfigManager.loadConfig().then(config => {
+            for (const server of config.servers.filter(s => s.enabled)) {
+                const client = new McpClient(server);
+                client.connect().then(() => {
+                    this.mcpClients.set(server.name, client);
+                    logger.info('[ChatPanel]', `MCP server connected: ${server.name}`);
+                }).catch(err => {
+                    logger.warn('[ChatPanel]', `MCP server connection failed: ${server.name}`, err);
+                });
+            }
+        }).catch(() => {});
+        this.mcpConfigManager.startWatching(() => {
+            // Reconnect on config change
+            for (const client of this.mcpClients.values()) {
+                client.disconnect().catch(() => {});
+            }
+            this.mcpClients.clear();
+            this.mcpConfigManager.loadConfig().then(config => {
+                for (const server of config.servers.filter(s => s.enabled)) {
+                    const client = new McpClient(server);
+                    client.connect().then(() => {
+                        this.mcpClients.set(server.name, client);
+                    }).catch(() => {});
+                }
+            }).catch(() => {});
+        });
+
+        // Load hooks config
+        this.hookConfigLoader.loadConfig().catch(err => {
+            logger.warn('[ChatPanel]', 'Failed to load hooks config', err);
+        });
+        this.hookConfigLoader.startWatching(() => {
+            this.hookConfigLoader.loadConfig().catch(() => {});
+        });
     }
 
     private initAgentEngine(): void {
@@ -1679,13 +1749,23 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
                 : slashCommand.prompt;
         }
 
+        // Resolve @mentions in the message
+        let mentionContexts = '';
+        try {
+            const mentionResult = await this.mentionProvider.resolveAllMentions(processedText);
+            processedText = mentionResult.processedText;
+            if (mentionResult.resolvedContexts.length > 0) {
+                mentionContexts = '\n--- Mentioned Context ---\n' + mentionResult.resolvedContexts.join('\n') + '\n';
+            }
+        } catch { /* mention resolution failed, continue with original text */ }
+
         let fileContexts = '';
         for (const filePath of attachedFiles) {
             fileContexts += await this.getFileContent(filePath);
         }
 
         const editorContext = (attachedFiles.length === 0 && attachedImages.length === 0) ? this.getEditorContext() : '';
-        const userMessageWithContext = `${processedText}${fileContexts}${editorContext} `;
+        const userMessageWithContext = `${processedText}${fileContexts}${editorContext}${mentionContexts} `;
 
         // Create multimodal content if images are present
         let content: string | any[] = userMessageWithContext;
@@ -1738,12 +1818,76 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             let needsMoreContext = true;
 
             const hints = resolveHints(getSelectedModel());
+
+            // Build active rules for prompt
+            let activeRulesSection = '';
+            try {
+                const allRules = this.ruleLoader.getRules();
+                if (allRules.length > 0) {
+                    const editor = vscode.window.activeTextEditor;
+                    const currentLang = editor?.document.languageId || 'typescript';
+                    const active = getActiveRules(allRules, currentLang, this.currentMode);
+                    if (active.length > 0) {
+                        activeRulesSection = formatRulesForPrompt(active);
+                    }
+                }
+            } catch { /* rules not loaded yet */ }
+
+            // Build MCP tools section for prompt
+            let mcpToolsSection = '';
+            try {
+                const allTools: import('../mcp/mcpTypes.js').McpTool[] = [];
+                for (const client of this.mcpClients.values()) {
+                    if (client.isConnected()) {
+                        const tools = await client.listTools();
+                        allTools.push(...tools);
+                    }
+                }
+                if (allTools.length > 0) {
+                    mcpToolsSection = formatToolsForPrompt(allTools);
+                }
+            } catch { /* MCP not configured */ }
+
+            // Browser action docs (if enabled)
+            const settings = getAutoApprovalConfig();
+            let browserDocs = '';
+            try {
+                const { getSettings } = await import('../config/settings.js');
+                if (getSettings().enableBrowser) {
+                    browserDocs = getBrowserActionDocs();
+                }
+            } catch { /* browser not enabled */ }
+
+            // Auto-collect project knowledge
+            let autoKnowledge = '';
+            try {
+                const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+                if (workspaceFolder) {
+                    const files = new Map<string, string>();
+                    const knownFiles = ['package.json', 'tsconfig.json', 'README.md', 'Dockerfile', 'pyproject.toml', 'Cargo.toml'];
+                    for (const name of knownFiles) {
+                        try {
+                            const fileUri = vscode.Uri.joinPath(workspaceFolder.uri, name);
+                            const data = await vscode.workspace.fs.readFile(fileUri);
+                            files.set(name, Buffer.from(data).toString('utf8'));
+                        } catch { /* file not found */ }
+                    }
+                    if (files.size > 0) {
+                        const facts = this.autoCollector.collectAll(files);
+                        autoKnowledge = this.autoCollector.formatForPrompt(facts, 2000);
+                    }
+                }
+            } catch { /* auto-collection failed */ }
+
             const ctx: PromptContext = {
                 workspaceInfo: this.getWorkspaceInfo(),
                 projectStructure: await this.getProjectStructure(),
-                projectKnowledge: await this.getProjectKnowledge(),
+                projectKnowledge: (await this.getProjectKnowledge()) + (autoKnowledge ? `\n${autoKnowledge}` : ''),
                 variant: hints.variant,
                 hints,
+                activeRules: activeRulesSection || undefined,
+                mcpToolsSection: mcpToolsSection || undefined,
+                browserActionDocs: browserDocs || undefined,
             };
             const systemMessage: ChatMessage = {
                 role: 'system',
@@ -1754,17 +1898,52 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
                 loopCount++;
                 let fullResponse = '';
 
-                const streamResult = streamChatCompletion(
-                    [systemMessage, ...this.chatHistory],
-                    signal
-                );
+                // Context compression before streaming
+                let messagesToSend: ChatMessage[] = [systemMessage, ...this.chatHistory];
+                const contextWindowSize = 32000; // Default context window estimate
+                if (needsCompression(messagesToSend, contextWindowSize)) {
+                    logger.info('[ChatPanel]', 'Context compression triggered');
+                    const summarizeFn = async (prompt: string): Promise<string> => {
+                        const summaryResult = streamChatCompletion([{ role: 'user', content: prompt }], signal);
+                        let summary = '';
+                        for await (const chunk of summaryResult.content) { summary += chunk; }
+                        return summary;
+                    };
+                    const compressionResult = await compressMessages(messagesToSend, contextWindowSize, summarizeFn);
+                    if (compressionResult.summaryInserted) {
+                        messagesToSend = compressionResult.messages as ChatMessage[];
+                        logger.info('[ChatPanel]', `Compressed: ${compressionResult.originalCount} → ${compressionResult.compressedCount} messages`);
+                    }
+                }
+
+                const streamResult = streamChatCompletion(messagesToSend, signal);
+
+                // Reset streaming diff parser for this response
+                this.streamingDiffParser.reset();
 
                 for await (const chunk of streamResult.content) {
                     if (signal.aborted) {
                         break;
                     }
                     fullResponse += chunk;
-                    this.panel.webview.postMessage({ command: 'streamChunk', content: chunk });
+
+                    // Streaming diff detection
+                    const feedResult = this.streamingDiffParser.feed(chunk);
+                    if (feedResult.textContent) {
+                        this.panel.webview.postMessage({ command: 'streamChunk', content: feedResult.textContent });
+                    }
+                    if (feedResult.operation && feedResult.operation.path) {
+                        this.panel.webview.postMessage({
+                            command: 'streamOperationChunk',
+                            operation: {
+                                state: feedResult.operation.state,
+                                type: feedResult.operation.type,
+                                path: feedResult.operation.path,
+                                contentSoFar: feedResult.operation.contentSoFar,
+                                isComplete: feedResult.operation.isComplete,
+                            },
+                        });
+                    }
                 }
 
                 // Get token usage after streaming completes
@@ -1795,6 +1974,33 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
                         });
                     }
                 }
+
+                // Handle MCP tool calls in response
+                try {
+                    const mcpCalls = parseMcpToolCalls(fullResponse);
+                    if (mcpCalls.length > 0) {
+                        needsMoreContext = true;
+                        let mcpResults = '\n--- MCP Tool Results ---\n';
+                        for (const call of mcpCalls) {
+                            this.panel.webview.postMessage({
+                                command: 'addMessage',
+                                role: 'assistant',
+                                content: `🔧 *Calling MCP tool: ${call.toolName}*`,
+                            });
+                            // Find the right client for this tool
+                            for (const client of this.mcpClients.values()) {
+                                try {
+                                    const result = await client.callTool(call.toolName, call.args);
+                                    mcpResults += formatToolResult(call.toolName, result) + '\n';
+                                    break;
+                                } catch { /* try next client */ }
+                            }
+                        }
+                        this.chatHistory.push({ role: 'user', content: mcpResults });
+                        this.panel.webview.postMessage({ command: 'startStreaming' });
+                        continue;
+                    }
+                } catch { /* MCP parsing failed, continue normally */ }
 
                 // In agent or ask mode, parse file operations
                 const operations = parseFileOperations(fullResponse);
@@ -1828,16 +2034,43 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
                 // Handle other operations (create/edit/delete) via UI
                 const writeOps = operations.filter(op => op.type !== 'read');
                 if (writeOps.length > 0) {
-                    // Agent 모드가 아니더라도 Plan 모드 등에서 작업이 있으면 제안할 수 있도록 함
-                    this.pendingOperations = writeOps;
-                    this.panel.webview.postMessage({
-                        command: 'showOperations',
-                        operations: writeOps.map(op => ({
-                            type: op.type,
-                            path: op.path,
-                            description: op.description,
-                        })),
-                    });
+                    // Auto-approval: split into auto-approved and pending ops
+                    const approvalConfig = getAutoApprovalConfig();
+                    const autoApprovedOps: FileOperation[] = [];
+                    const pendingOps: FileOperation[] = [];
+
+                    for (const op of writeOps) {
+                        const category = classifyOperation(op.type);
+                        if (shouldAutoApprove(approvalConfig, category, op.path)) {
+                            autoApprovedOps.push(op);
+                        } else {
+                            pendingOps.push(op);
+                        }
+                    }
+
+                    // Execute auto-approved operations immediately
+                    if (autoApprovedOps.length > 0) {
+                        this.pendingOperations = autoApprovedOps;
+                        await this.applyFileOperations();
+                        this.panel.webview.postMessage({
+                            command: 'addMessage',
+                            role: 'assistant',
+                            content: `✅ Auto-approved ${autoApprovedOps.length} operation(s): ${autoApprovedOps.map(o => o.path).join(', ')}`,
+                        });
+                    }
+
+                    // Show remaining pending operations for manual approval
+                    if (pendingOps.length > 0) {
+                        this.pendingOperations = pendingOps;
+                        this.panel.webview.postMessage({
+                            command: 'showOperations',
+                            operations: pendingOps.map(op => ({
+                                type: op.type,
+                                path: op.path,
+                                description: op.description,
+                            })),
+                        });
+                    }
                 }
 
                 this.saveChatHistory();
@@ -2050,6 +2283,16 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
     public dispose(): void {
         ChatPanel.currentPanel = undefined;
         this.panel.dispose();
+
+        // Clean up subsystems
+        this.ruleLoader.dispose();
+        this.mcpConfigManager.dispose();
+        this.hookConfigLoader.dispose();
+        for (const client of this.mcpClients.values()) {
+            client.disconnect().catch(() => {});
+        }
+        this.mcpClients.clear();
+
         while (this.disposables.length) {
             const x = this.disposables.pop();
             if (x) {

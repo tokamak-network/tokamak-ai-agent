@@ -222,6 +222,66 @@ Supported formats: \`.md\`, \`.txt\` (alphabetical by filename, max ~8KB total).
         })
     );
 
+    // MCP Configuration command
+    context.subscriptions.push(
+        vscode.commands.registerCommand('tokamak.configureMcp', async () => {
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                vscode.window.showErrorMessage('No workspace folder open');
+                return;
+            }
+
+            const { McpConfigManager } = await import('./mcp/mcpConfigManager.js');
+            const configManager = new McpConfigManager();
+
+            try {
+                await configManager.createDefaultConfig();
+                const configUri = vscode.Uri.joinPath(workspaceFolder.uri, '.tokamak', 'mcp.json');
+                await vscode.window.showTextDocument(configUri);
+                vscode.window.showInformationMessage('MCP configuration created at .tokamak/mcp.json');
+            } catch (error) {
+                vscode.window.showErrorMessage(`Failed to create MCP config: ${error}`);
+            }
+        })
+    );
+
+    // Rules initialization command
+    context.subscriptions.push(
+        vscode.commands.registerCommand('tokamak.initRules', async () => {
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                vscode.window.showErrorMessage('No workspace folder open');
+                return;
+            }
+
+            const rulesFolder = vscode.Uri.joinPath(workspaceFolder.uri, '.tokamak', 'rules');
+            const defaultRule = `---
+description: TypeScript conventions
+condition:
+  languages: [typescript, typescriptreact]
+  modes: [agent]
+priority: 10
+---
+- Use strict TypeScript. No \`any\`.
+- Prefer \`interface\` over \`type\` for object shapes.
+- Use named exports, not default exports.
+- File naming: camelCase for utilities, PascalCase for classes.
+`;
+
+            try {
+                await vscode.workspace.fs.createDirectory(rulesFolder);
+                await vscode.workspace.fs.writeFile(
+                    vscode.Uri.joinPath(rulesFolder, 'ts-conventions.md'),
+                    Buffer.from(defaultRule, 'utf8')
+                );
+                vscode.window.showInformationMessage('Rules folder created at .tokamak/rules/ with example rule');
+                await vscode.window.showTextDocument(vscode.Uri.joinPath(rulesFolder, 'ts-conventions.md'));
+            } catch (error) {
+                vscode.window.showErrorMessage(`Failed to create rules folder: ${error}`);
+            }
+        })
+    );
+
     // Listen for configuration changes
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((e) => {

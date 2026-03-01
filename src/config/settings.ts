@@ -4,6 +4,8 @@ import * as vscode from 'vscode';
 export const TOKAMAK_API_BASE_URL = 'https://api.ai.tokamak.network';
 
 import type { AgentStrategy, PlanStrategy } from '../agent/types.js';
+import type { AutoApprovalConfig, ToolCategory, ApprovalLevel } from '../approval/autoApproval.js';
+import { getDefaultAutoApprovalConfig } from '../approval/autoApproval.js';
 
 export interface TokamakSettings {
     apiKey: string;
@@ -20,6 +22,7 @@ export interface TokamakSettings {
     maxDebateIterations: number;
     agentStrategy: AgentStrategy;
     planStrategy: PlanStrategy;
+    enableBrowser: boolean;
 }
 
 export function setSettingsContext(context: vscode.ExtensionContext): void {
@@ -47,6 +50,7 @@ export function getSettings(): TokamakSettings {
         maxDebateIterations: config.get<number>('maxDebateIterations', 2),
         agentStrategy: config.get<AgentStrategy>('agentStrategy', 'review'),
         planStrategy: config.get<PlanStrategy>('planStrategy', 'debate'),
+        enableBrowser: config.get<boolean>('enableBrowser', false),
     };
 }
 
@@ -113,6 +117,25 @@ export async function setPlanStrategy(strategy: PlanStrategy): Promise<void> {
 export function isConfigured(): boolean {
     const settings = getSettings();
     return settings.apiKey.length > 0;
+}
+
+export function getAutoApprovalConfig(): AutoApprovalConfig {
+    const config = vscode.workspace.getConfiguration('tokamak');
+    const defaults = getDefaultAutoApprovalConfig();
+    const toolCategories: ToolCategory[] = ['read_file', 'write_file', 'create_file', 'delete_file', 'terminal_command', 'search'];
+    const tools = { ...defaults.tools };
+    for (const cat of toolCategories) {
+        const val = config.get<ApprovalLevel>(`autoApproval.tools.${cat}`);
+        if (val) { tools[cat] = val; }
+    }
+    return {
+        enabled: config.get<boolean>('autoApproval.enabled', defaults.enabled),
+        tools,
+        allowedPaths: config.get<string[]>('autoApproval.allowedPaths', defaults.allowedPaths),
+        protectedPaths: config.get<string[]>('autoApproval.protectedPaths', defaults.protectedPaths),
+        maxAutoApproveFileSize: config.get<number>('autoApproval.maxAutoApproveFileSize', defaults.maxAutoApproveFileSize),
+        allowedCommands: config.get<string[]>('autoApproval.allowedCommands', defaults.allowedCommands),
+    };
 }
 
 export async function promptForConfiguration(): Promise<boolean> {
