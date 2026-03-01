@@ -56,6 +56,7 @@ export interface PlanStep {
     action?: string; // AI가 생성한 구체적인 액션/코드
     result?: string; // 실행 결과 (성공 메시지 또는 에러 로그)
     errorFingerprint?: string; // 동일 에러 반복 감지용
+    terminalErrors?: import('./terminalOutputParser.js').TerminalError[];
 }
 
 export interface AgentContext {
@@ -115,7 +116,7 @@ export interface DebateFeedback {
 }
 
 export interface AgentAction {
-    type: 'write' | 'read' | 'run' | 'search' | 'ask_user' | 'delete' | 'multi_write';
+    type: 'write' | 'read' | 'run' | 'search' | 'ask_user' | 'delete' | 'multi_write' | 'mcp_tool' | 'browser';
     payload: any;
 }
 

@@ -15,7 +15,16 @@
       "Bash(npm test 2>&1)",
       "Bash(npm run compile 2>&1 && npm test 2>&1)",
       "WebSearch",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(ls -la /Users/harvey/Desktop/project/2026/others/cline/src/core/controller/*.ts)",
+      "Bash(ls -la /Users/harvey/Desktop/project/2026/others/cline/src/core/task/*.ts | head -20)",
+      "Bash(ls -la /Users/harvey/Desktop/project/2026/others/cline/src/core/api/*.ts | head -20)",
+      "Bash(ls -la /Users/harvey/Desktop/project/2026/others/cline/src/services/mcp/*.ts)",
+      "Bash(ls -la /Users/harvey/Desktop/project/2026/others/cline/tsconfig*.json)",
+      "Bash(cat '/Users/harvey/.claude/projects/-Users-harvey-Desktop-project-2026-trackB-tokamak-agent/5d883bea-9e00-44b4-a949-76de3af841c7/tool-results/toolu_01GRCyGa5qoJeYyDXM7YHLD9.json' | python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); print\\(data[0]['text']\\)\" 2>/dev/null | head -1500)",
+      "Bash(npx vitest run src/__tests__/autoApproval.test.ts src/__tests__/contextCompressor.test.ts src/__tests__/terminalOutputParser.test.ts 2>&1)",
+      "Bash(npx vitest run src/__tests__/autoApproval.test.ts --reporter=verbose 2>&1 | tail -30)",
+      "Bash(find /Users/harvey/Desktop/project/2026/trackB/tokamak-agent/src/__tests__ -name \"*mcp*\" -o -name \"*rule*\" -o -name \"*hook*\" 2>/dev/null | head -20)"
     ]
   }
 }

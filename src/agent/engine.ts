@@ -9,7 +9,7 @@ import { ContextManager } from './contextManager.js';
 import { DependencyAnalyzer } from './dependencyAnalyzer.js';
 import { CheckpointManager, Checkpoint } from './checkpointManager.js';
 import { streamChatCompletion, ChatMessage } from '../api/client.js';
-import { isCheckpointsEnabled, getSettings as getConfigSettings } from '../config/settings.js';
+import { isCheckpointsEnabled, getSettings as getConfigSettings, getAutoApprovalConfig } from '../config/settings.js';
 import {
     buildReviewCritiquePrompt, buildReviewRebuttalPrompt,
     buildDebateChallengePrompt, buildDebateDefensePrompt,
@@ -19,6 +19,10 @@ import {
 import type { PromptHints } from '../prompts/index.js';
 import { logger } from '../utils/logger.js';
 import { stripThinkingBlocks } from '../utils/contentUtils.js';
+import { analyzeTerminalOutput, formatErrorsForPrompt } from './terminalOutputParser.js';
+import { DiagnosticDiffTracker } from './diagnosticDiffTracker.js';
+import { shouldAutoApprove, classifyOperation } from '../approval/autoApproval.js';
+import { needsCompression, compressMessages } from '../context/contextCompressor.js';
 
 /**
  * AI 응답 텍스트에서 가장 바깥쪽 JSON 객체를 올바르게 추출합니다.
@@ -81,6 +85,7 @@ export class AgentEngine {
     private dependencyAnalyzer: DependencyAnalyzer = new DependencyAnalyzer();
     private checkpointManager: CheckpointManager | null = null;
     private lastDiagnostics: DiagnosticInfo[] = [];
+    private diagnosticDiffTracker: DiagnosticDiffTracker = new DiagnosticDiffTracker();
 
     constructor(context: AgentContext) {
         this.context = context;
@@ -394,13 +399,38 @@ ${directFileContext}
                 // 불일치 시 현재 파일 내용을 제공하여 AI에게 즉시 수정 요청
                 action = await this.preflightCheckAction(action, step);
 
+                // Auto-approval check for agent actions
+                const approvalConfig = getAutoApprovalConfig();
+                const actionCategory = classifyOperation(action.type);
+                const actionFilePath = action.payload?.path;
+                const actionCommand = action.payload?.command;
+                const autoApproved = shouldAutoApprove(approvalConfig, actionCategory, actionFilePath, undefined, actionCommand);
+
+                if (!autoApproved && approvalConfig.enabled && actionCategory !== 'read_file' && actionCategory !== 'search') {
+                    logger.info('[AgentEngine]', `Action requires approval: ${action.type} ${actionFilePath || actionCommand || ''}`);
+                }
+
                 // 터미널 명령 실행 전 메시지 표시
                 if (action.type === 'run' && this.context.onMessage) {
                     this.context.onMessage('assistant', `🔧 Executing: \`${action.payload.command}\``);
                 }
 
+                // Capture diagnostic snapshot before execution
+                await this.diagnosticDiffTracker.captureSnapshot();
+
                 const result = await this.executor.execute(action);
                 step.result = result;
+
+                // Terminal output analysis for 'run' actions
+                if (action.type === 'run') {
+                    const analysis = analyzeTerminalOutput(result);
+                    if (!analysis.success && analysis.errors.length > 0) {
+                        step.terminalErrors = analysis.errors;
+                        const formattedErrors = formatErrorsForPrompt(analysis.errors);
+                        logger.info('[AgentEngine]', `Terminal errors detected (${analysis.errors.length}): ${analysis.suggestedAction}`);
+                        step.result = `${result}\n\n--- Parsed Errors ---\n${formattedErrors}`;
+                    }
+                }
 
                 // 실행 결과를 메시지로 표시
                 if (this.context.onMessage) {
@@ -454,8 +484,22 @@ ${directFileContext}
 
     private async handleObservation(): Promise<void> {
         this.lastDiagnostics = await this.observer.getDiagnostics();
-        const errors = this.lastDiagnostics.filter(d => d.severity === 'Error');
 
+        // Diagnostic diff tracking: compare before/after snapshots
+        const diagnosticDiff = await this.diagnosticDiffTracker.diffFromLast();
+        if (diagnosticDiff && diagnosticDiff.introduced.length > 0 && this.diagnosticDiffTracker.shouldAutoFix(diagnosticDiff)) {
+            const step = this.plan[this.currentStepIndex];
+            if (step) {
+                step.status = 'failed';
+                step.result = this.diagnosticDiffTracker.formatDiffForPrompt(diagnosticDiff);
+                this.notifyPlanChange();
+            }
+            logger.info('[AgentEngine]', `Diagnostic diff: ${diagnosticDiff.introduced.length} new, ${diagnosticDiff.resolved.length} resolved`);
+            await this.transitionTo('Fixing');
+            return;
+        }
+
+        const errors = this.lastDiagnostics.filter(d => d.severity === 'Error');
         if (errors.length > 0) {
             const step = this.plan[this.currentStepIndex];
             if (step) {
@@ -556,6 +600,12 @@ ${directFileContext}
         const errorContext = this.observer.formatDiagnostics(this.lastDiagnostics);
         const stepResult = step.result || '(No result recorded)';
 
+        // Include structured terminal errors if available
+        let terminalErrorContext = '';
+        if (step.terminalErrors && step.terminalErrors.length > 0) {
+            terminalErrorContext = `\n\n**Parsed Terminal Errors:**\n${formatErrorsForPrompt(step.terminalErrors)}\n`;
+        }
+
         // SEARCH/REPLACE 불일치 실패 감지 → 대상 파일의 현재 내용을 명시적으로 포함
         let searchReplaceHint = '';
         const isSearchReplaceFail = /SEARCH block does not match|Search\/Replace failed|No valid SEARCH\/REPLACE/.test(stepResult);
@@ -601,7 +651,7 @@ ${mistakeWarning}
 **실행 결과**: ${stepResult.substring(0, 500)}
 
 **발생한 에러**:
-${errorContext}
+${errorContext}${terminalErrorContext}
 ${fileContext}${searchReplaceHint}
 이 에러를 수정하기 위한 JSON Action을 생성해주세요.
 기존 파일 수정 시 반드시 SEARCH/REPLACE 형식을 사용하세요 (파일 전체를 덮어쓰지 마세요):
@@ -1145,7 +1195,29 @@ ${fileContext}${searchReplaceHint}
 
         const systemContent = overrideSystemPrompt ?? this.getSystemPrompt();
         const systemMessage: ChatMessage = { role: 'system', content: systemContent };
-        const fullMessages = [systemMessage, ...messages];
+        let fullMessages = [systemMessage, ...messages];
+
+        // Context compression check before streaming
+        const contextWindowSize = this.context.tokenBudget || 32000;
+        if (needsCompression(fullMessages, contextWindowSize)) {
+            logger.info('[AgentEngine]', 'Context compression triggered');
+            const summarizeFn = async (prompt: string): Promise<string> => {
+                const summaryResult = streamChatCompletion(
+                    [{ role: 'user', content: prompt }],
+                    this.context.abortSignal
+                );
+                let summary = '';
+                for await (const chunk of summaryResult.content) {
+                    summary += chunk;
+                }
+                return summary;
+            };
+            const compressionResult = await compressMessages(fullMessages, contextWindowSize, summarizeFn);
+            if (compressionResult.summaryInserted) {
+                fullMessages = compressionResult.messages as ChatMessage[];
+                logger.info('[AgentEngine]', `Compressed: ${compressionResult.originalCount} → ${compressionResult.compressedCount} messages, saved ~${compressionResult.estimatedTokensSaved} tokens`);
+            }
+        }
 
         let aiResponse = '';
         // 현재 숨겨진 블록(<think>, [TOOL_CALL]) 안에 있는지 추적

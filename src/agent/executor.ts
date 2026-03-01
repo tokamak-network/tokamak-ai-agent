@@ -337,6 +337,10 @@ export class Executor {
                 return await this.runTerminal(action.payload.command);
             case 'delete':
                 return await this.deleteFile(action.payload.path);
+            case 'mcp_tool':
+                return `[MCP Tool] ${action.payload.toolName}: Delegated to MCP client`;
+            case 'browser':
+                return `[Browser] ${action.payload.type}: Delegated to browser service`;
             default:
                 throw new Error(`Unsupported action type: ${action.type}`);
         }
