@@ -298,6 +298,9 @@ export class ChatPanel {
             case 'searchFiles':
                 await this.searchFiles(message.query);
                 break;
+            case 'getMentionSuggestions':
+                await this.handleMentionQuery(message.text, message.cursorPos);
+                break;
             case 'openFile':
                 await this.openFile(message.path);
                 break;
@@ -661,6 +664,30 @@ export class ChatPanel {
             this.panel.webview.postMessage({ command: 'fileSearchResults', files: results.sort((a, b) => a.path.length - b.path.length).slice(0, 50) });
         } catch {
             this.panel.webview.postMessage({ command: 'fileSearchResults', files: [] });
+        }
+    }
+
+    private async handleMentionQuery(text: string, cursorPos: number): Promise<void> {
+        const query = this.mentionProvider.parseQuery(text, cursorPos);
+        if (!query) {
+            this.panel.webview.postMessage({ command: 'mentionSuggestions', suggestions: [] });
+            return;
+        }
+        try {
+            const suggestions = await this.mentionProvider.getSuggestions(query);
+            this.panel.webview.postMessage({
+                command: 'mentionSuggestions',
+                suggestions: suggestions.map(s => ({
+                    type: s.type,
+                    displayName: s.displayName,
+                    insertText: s.insertText,
+                    icon: s.icon,
+                    detail: s.detail || '',
+                    isCategory: !query.type, // true when showing @file/@folder/@symbol/@problems choices
+                })),
+            });
+        } catch {
+            this.panel.webview.postMessage({ command: 'mentionSuggestions', suggestions: [] });
         }
     }
 

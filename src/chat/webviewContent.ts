@@ -1165,7 +1165,8 @@ export function getHtmlContent(): string {
             let attachedFiles = [];
             let autocompleteFiles = [];
             let autocompleteCommands = [];
-            let autocompleteType = 'file'; // 'file' or 'command'
+            let autocompleteMentions = [];
+            let autocompleteType = 'file'; // 'file', 'command', or 'mention'
             let selectedAutocompleteIndex = 0;
             let mentionStartIndex = -1;
             let slashStartIndex = -1;
@@ -1411,6 +1412,33 @@ export function getHtmlContent(): string {
             autocomplete.classList.add('visible');
             }
 
+            function showMentionAutocomplete(suggestions) {
+            autocompleteMentions = suggestions;
+            autocompleteType = 'mention';
+            selectedAutocompleteIndex = 0;
+
+            if (suggestions.length === 0) {
+            autocomplete.classList.remove('visible');
+            return;
+            }
+
+            autocomplete.innerHTML = suggestions.map((s, index) => \`
+            <div class="autocomplete-item \${index === 0 ? 'selected' : ''}" data-index="\${index}">
+            <span class="icon">\${s.icon}</span>
+            <span class="name">\${s.displayName}</span>
+            <span class="path">\${s.detail || ''}</span>
+            </div>
+            \`).join('');
+
+            autocomplete.querySelectorAll('.autocomplete-item').forEach(item => {
+            item.addEventListener('click', () => {
+            selectAutocompleteItem(parseInt(item.dataset.index));
+            });
+            });
+
+            autocomplete.classList.add('visible');
+            }
+
             function showSlashAutocomplete(commands) {
             autocompleteCommands = commands;
             autocompleteType = 'command';
@@ -1445,7 +1473,32 @@ export function getHtmlContent(): string {
             }
 
             function selectAutocompleteItem(index) {
-            if (autocompleteType === 'file') {
+            if (autocompleteType === 'mention') {
+            const item = autocompleteMentions[index];
+            if (!item) return;
+
+            const value = messageInput.value;
+            const beforeMention = value.substring(0, mentionStartIndex);
+            const afterCursor = value.substring(messageInput.selectionStart);
+
+            if (item.isCategory) {
+            // Category selected (e.g., @file:) — insert prefix and re-trigger suggestions
+            messageInput.value = beforeMention + item.insertText + afterCursor;
+            const newCursorPos = beforeMention.length + item.insertText.length;
+            messageInput.selectionStart = messageInput.selectionEnd = newCursorPos;
+            // Re-trigger mention suggestions for the selected category
+            hideAutocomplete();
+            mentionStartIndex = beforeMention.length; // keep @ position
+            vscode.postMessage({ command: 'getMentionSuggestions', text: messageInput.value, cursorPos: newCursorPos });
+            messageInput.focus();
+            return;
+            } else {
+            // Specific item selected — insert the mention text + space
+            messageInput.value = beforeMention + item.insertText + ' ' + afterCursor.trimStart();
+            const newCursorPos = beforeMention.length + item.insertText.length + 1;
+            messageInput.selectionStart = messageInput.selectionEnd = newCursorPos;
+            }
+            } else if (autocompleteType === 'file') {
             const file = autocompleteFiles[index];
             if (!file) return;
 
@@ -1834,7 +1887,7 @@ export function getHtmlContent(): string {
             const query = textBeforeCursor.substring(atIndex + 1);
             if (!/\\s/.test(query)) {
             mentionStartIndex = atIndex;
-            vscode.postMessage({ command: 'searchFiles', query: query });
+            vscode.postMessage({ command: 'getMentionSuggestions', text: value, cursorPos: cursorPos });
             return;
             }
             }
@@ -1893,6 +1946,9 @@ export function getHtmlContent(): string {
             break;
             case 'fileSearchResults':
             showAutocomplete(message.files);
+            break;
+            case 'mentionSuggestions':
+            showMentionAutocomplete(message.suggestions);
             break;
             case 'modeChanged':
             currentMode = message.mode;
