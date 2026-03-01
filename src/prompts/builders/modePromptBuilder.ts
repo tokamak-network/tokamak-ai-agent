@@ -2,6 +2,8 @@ import type { ChatMode, PromptContext, PromptHints } from '../types.js';
 import { normalizeHints } from '../components/_helpers.js';
 import { getFileOpReadFormat, getFileOpFullFormat } from '../components/fileOperationFormat.js';
 import { getGeneralRules, getAgentRules, getAgentExample, getPlanOutputFormat } from '../components/rules.js';
+import type { Rule } from '../../rules/ruleTypes.js';
+import type { McpTool } from '../../mcp/mcpTypes.js';
 
 /**
  * 모드별 시스템 프롬프트를 조립합니다.
@@ -10,12 +12,15 @@ import { getGeneralRules, getAgentRules, getAgentExample, getPlanOutputFormat } 
 export function buildModePrompt(mode: ChatMode, ctx: PromptContext): string {
     const { workspaceInfo, projectStructure, projectKnowledge, variant } = ctx;
     const hints: PromptHints = ctx.hints ?? normalizeHints(variant);
+    const rulesSection = ctx.activeRules ? `\n${ctx.activeRules}\n` : '';
+    const mcpSection = ctx.mcpToolsSection ? `\n${ctx.mcpToolsSection}\n` : '';
+    const browserSection = ctx.browserActionDocs ? `\n${ctx.browserActionDocs}\n` : '';
 
     switch (mode) {
         case 'ask':
             return `You are a helpful coding assistant integrated with VS Code.${workspaceInfo}
 ${projectStructure}
-${projectKnowledge}
+${projectKnowledge}${rulesSection}
 
 General Rules:
 ${getGeneralRules(hints)}
@@ -27,7 +32,7 @@ ${getFileOpReadFormat(hints)}`;
 --- Project Structure ---
 The following is the directory structure of the current workspace. Use this to identify files you might need to read.
 ${projectStructure}
-${projectKnowledge}
+${projectKnowledge}${rulesSection}
 
 Your role is to help the user plan their coding tasks.
 - Analyze the codebase using the project structure and 'read' operations.
@@ -41,10 +46,10 @@ ${getPlanOutputFormat(hints)}`;
         case 'agent':
             return `You are an autonomous coding agent integrated with VS Code.${workspaceInfo}
 ${projectStructure}
-${projectKnowledge}
+${projectKnowledge}${rulesSection}
 
 ${getFileOpFullFormat(hints)}
-
+${mcpSection}${browserSection}
 ${getAgentRules(hints)}${getAgentExample(hints)}`;
 
         default:

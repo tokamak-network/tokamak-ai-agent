@@ -17,4 +17,7 @@ export interface PromptContext {
     projectKnowledge: string;
     variant: PromptVariant;
     hints?: PromptHints;
+    activeRules?: string;        // Formatted active rules from Rule System
+    mcpToolsSection?: string;    // Formatted MCP tools for prompt
+    browserActionDocs?: string;  // Browser action documentation
 }
