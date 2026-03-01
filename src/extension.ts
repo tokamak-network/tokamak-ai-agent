@@ -1,10 +1,12 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { ChatPanel } from './chat/chatPanel.js';
 import { InlineCompletionProvider } from './completion/inlineCompletionProvider.js';
 import { explainCode, refactorCode, disposeOutputChannel } from './codeActions/codeActionProvider.js';
 import { resetClient } from './api/client.js';
 import { setSettingsContext } from './config/settings.js';
 import { logger } from './utils/logger.js';
+import { TreeSitterService } from './ast/treeSitterService.js';
 
 export function activate(context: vscode.ExtensionContext): void {
     logger.init(context);
@@ -13,6 +15,18 @@ export function activate(context: vscode.ExtensionContext): void {
     // Set context for settings and ChatPanel
     setSettingsContext(context);
     ChatPanel.setContext(context);
+
+    // Initialize Tree-sitter WASM path and pre-load the service
+    TreeSitterService.setWasmDir(path.join(context.extensionPath, 'parsers'));
+    TreeSitterService.getInstance().initialize().then(() => {
+        if (TreeSitterService.getInstance().isInitialized()) {
+            logger.info('[Extension]', 'Tree-sitter AST initialized (languages: typescript, javascript, python, go)');
+        } else {
+            logger.warn('[Extension]', 'Tree-sitter AST not available — WASM files missing or load failed');
+        }
+    }).catch(() => {
+        logger.warn('[Extension]', 'Tree-sitter initialization failed — AST features will be disabled');
+    });
 
     // Register Inline Completion Provider
     const inlineCompletionProvider = new InlineCompletionProvider();

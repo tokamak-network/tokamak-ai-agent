@@ -24,7 +24,11 @@
       "Bash(cat '/Users/harvey/.claude/projects/-Users-harvey-Desktop-project-2026-trackB-tokamak-agent/5d883bea-9e00-44b4-a949-76de3af841c7/tool-results/toolu_01GRCyGa5qoJeYyDXM7YHLD9.json' | python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); print\\(data[0]['text']\\)\" 2>/dev/null | head -1500)",
       "Bash(npx vitest run src/__tests__/autoApproval.test.ts src/__tests__/contextCompressor.test.ts src/__tests__/terminalOutputParser.test.ts 2>&1)",
       "Bash(npx vitest run src/__tests__/autoApproval.test.ts --reporter=verbose 2>&1 | tail -30)",
-      "Bash(find /Users/harvey/Desktop/project/2026/trackB/tokamak-agent/src/__tests__ -name \"*mcp*\" -o -name \"*rule*\" -o -name \"*hook*\" 2>/dev/null | head -20)"
+      "Bash(find /Users/harvey/Desktop/project/2026/trackB/tokamak-agent/src/__tests__ -name \"*mcp*\" -o -name \"*rule*\" -o -name \"*hook*\" 2>/dev/null | head -20)",
+      "Bash(ls node_modules/web-tree-sitter/*.wasm 2>/dev/null; ls node_modules/web-tree-sitter/*.js 2>/dev/null)",
+      "Bash(npm run copy:parsers 2>&1 && ls -lh parsers/)",
+      "Bash(npx vitest run src/__tests__/treeSitter.test.ts 2>&1)",
+      "Bash(npx tsc --noEmit 2>&1 | tail -5 && npm test 2>&1 | tail -5)"
     ]
   }
 }

@@ -68,9 +68,11 @@ export class ContextManager {
                         }
                     } catch { /* tree-sitter not available */ }
 
-                    if (!outlineUsed) {
+                    if (outlineUsed) {
+                        logger.info('[ContextManager]', `AST outline used for: ${file.path}`);
+                    } else {
                         // Fall back to AI summarization
-                        logger.info('[ContextManager]', `Summarizing heavy file: ${file.path}`);
+                        logger.info('[ContextManager]', `Summarizing heavy file (no AST): ${file.path}`);
                         const summary = await this.summarizer.summarize(file.path, content);
                         contextParts.push(`--- FILE: ${file.path} (Summary, Score: ${file.score}) ---\n${summary}\n`);
                         currentEstimatedTokens += summary.length / 3;

@@ -4,13 +4,23 @@
  * Uses dynamic import for web-tree-sitter to handle cases where the
  * package may not be installed or the WASM files are unavailable.
  * Degrades gracefully — returns null when tree-sitter is not available.
+ *
+ * Compatible with web-tree-sitter v0.20.x (tree-sitter.wasm) and
+ * v0.22+ (web-tree-sitter.wasm).
  */
+
+import * as path from 'path';
+import * as fs from 'fs';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 export class TreeSitterService {
     private static instance: TreeSitterService | null = null;
+    /** Absolute path to the directory containing .wasm files (set by extension on activation). */
+    private static wasmDir: string = '';
+
     private ParserClass: any = null;
+    private LanguageClass: any = null;
     private parser: any = null;
     private languages: Map<string, any> = new Map();
     private initialized: boolean = false;
@@ -22,14 +32,60 @@ export class TreeSitterService {
         return TreeSitterService.instance;
     }
 
+    /**
+     * Call once during extension activation to tell the service where the
+     * WASM files live (e.g. `path.join(context.extensionPath, 'parsers')`).
+     */
+    static setWasmDir(dir: string): void {
+        TreeSitterService.wasmDir = dir;
+    }
+
     async initialize(): Promise<void> {
         if (this.initialized) {
             return;
         }
+        if (!TreeSitterService.wasmDir) {
+            return;
+        }
         try {
             const mod = await import('web-tree-sitter');
-            this.ParserClass = mod.default ?? mod;
-            await this.ParserClass.init();
+
+            // Resolve Parser class (structure varies by version)
+            //  v0.20.x: mod.default = Parser class, Parser.Language available after init()
+            //  v0.22+:  mod = { Parser, Language, ... } or mod.default = { Parser, Language }
+            const raw: any = mod.default ?? mod;
+            if (typeof raw === 'function' && typeof raw.init === 'function') {
+                // v0.20.x style: default export IS the Parser constructor
+                this.ParserClass = raw;
+            } else if (raw.Parser) {
+                // v0.22+ style: named exports
+                this.ParserClass = raw.Parser;
+            } else {
+                return; // unknown module shape
+            }
+
+            // Locate the core WASM runtime (name varies by version)
+            const wasmDir = TreeSitterService.wasmDir;
+            const coreWasm = ['tree-sitter.wasm', 'web-tree-sitter.wasm']
+                .map(name => path.join(wasmDir, name))
+                .find(p => fs.existsSync(p));
+
+            if (!coreWasm) {
+                return;
+            }
+
+            await this.ParserClass.init({
+                locateFile() {
+                    return coreWasm;
+                },
+            });
+
+            // Language class becomes available AFTER init() in v0.20.x
+            this.LanguageClass = raw.Language ?? this.ParserClass.Language;
+            if (!this.LanguageClass) {
+                return;
+            }
+
             this.parser = new this.ParserClass();
             this.initialized = true;
         } catch {
@@ -37,6 +93,7 @@ export class TreeSitterService {
             this.initialized = false;
             this.parser = null;
             this.ParserClass = null;
+            this.LanguageClass = null;
         }
     }
 
@@ -45,7 +102,7 @@ export class TreeSitterService {
     }
 
     async getParser(language: string): Promise<any | null> {
-        if (!this.initialized || !this.parser || !this.ParserClass) {
+        if (!this.initialized || !this.parser || !this.LanguageClass) {
             return null;
         }
 
@@ -56,7 +113,11 @@ export class TreeSitterService {
 
         if (!this.languages.has(language)) {
             try {
-                const lang = await this.ParserClass.Language.load(`tree-sitter-${language}.wasm`);
+                const wasmPath = path.join(
+                    TreeSitterService.wasmDir,
+                    `tree-sitter-${language}.wasm`,
+                );
+                const lang = await this.LanguageClass.load(wasmPath);
                 this.languages.set(language, lang);
             } catch {
                 return null;
@@ -100,6 +161,7 @@ export class TreeSitterService {
         this.languages.clear();
         this.initialized = false;
         this.ParserClass = null;
+        this.LanguageClass = null;
         TreeSitterService.instance = null;
     }
 }

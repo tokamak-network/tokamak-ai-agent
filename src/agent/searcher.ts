@@ -43,16 +43,16 @@ export class Searcher {
             const service = TreeSitterService.getInstance();
             if (service.isInitialized()) {
                 const extractor = new DefinitionExtractor(service);
-                // Search code files for definition names matching keywords
                 const codeFiles = await vscode.workspace.findFiles(
                     '**/*.{ts,tsx,js,jsx,py,go}',
                     '**/node_modules/**',
                     20
                 );
+                let astMatchCount = 0;
                 for (const uri of codeFiles) {
                     try {
                         const stat = await vscode.workspace.fs.stat(uri);
-                        if (stat.size > 200000) continue; // Skip large files
+                        if (stat.size > 200000) continue;
                         const ext = '.' + uri.fsPath.split('.').pop();
                         const language = service.getLanguageFromExtension(ext);
                         if (!language) continue;
@@ -64,11 +64,15 @@ export class Searcher {
                                 if (def.name.toLowerCase().includes(kw.toLowerCase())) {
                                     const relPath = vscode.workspace.asRelativePath(uri);
                                     this.updateScore(results, relPath, 15, `AST definition: ${def.name}`);
+                                    astMatchCount++;
                                     break;
                                 }
                             }
                         }
                     } catch { continue; }
+                }
+                if (astMatchCount > 0) {
+                    logger.info('[Searcher]', `AST matched ${astMatchCount} definition(s) for keywords: ${keywords.join(', ')}`);
                 }
             }
         } catch { /* tree-sitter not available */ }
