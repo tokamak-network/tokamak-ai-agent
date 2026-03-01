@@ -8,6 +8,12 @@ import {
     removeLeadingPipeArtifact,
 } from '../utils/contentUtils.js';
 import { logger } from '../utils/logger.js';
+import { HookConfigLoader } from '../hooks/hookConfigLoader.js';
+import { HookRunner } from '../hooks/hookRunner.js';
+import type { HookInput } from '../hooks/hookTypes.js';
+import { BrowserService } from '../browser/browserService.js';
+import { parseBrowserAction, formatBrowserResult } from '../browser/browserActions.js';
+import { getSettings } from '../config/settings.js';
 
 // ─── SEARCH/REPLACE Matching Helpers (adapted from Cline diff.ts) ─────────────
 
@@ -319,6 +325,19 @@ class AsyncMutex {
 export class Executor {
     /** 파일 쓰기/삭제 직렬화용 뮤텍스 — 동시 접근으로 인한 충돌 방지 */
     private readonly writeMutex = new AsyncMutex();
+    private hookConfigLoader: HookConfigLoader = new HookConfigLoader();
+    private hookRunner: HookRunner = new HookRunner();
+    private hooksInitialized: boolean = false;
+    private browserService: BrowserService | null = null;
+
+    private async ensureHooksLoaded(): Promise<void> {
+        if (!this.hooksInitialized) {
+            try {
+                await this.hookConfigLoader.loadConfig();
+                this.hooksInitialized = true;
+            } catch { /* hooks not configured */ }
+        }
+    }
 
     /**
      * 정의된 액션을 VS Code 환경에서 실제로 실행합니다.
@@ -326,24 +345,66 @@ export class Executor {
     public async execute(action: AgentAction): Promise<string> {
         logger.info('[Executor]', `Executing action: ${action.type}`, action.payload);
 
+        // PreToolUse hook
+        await this.ensureHooksLoaded();
+        const preHooks = this.hookConfigLoader.getHooksForEvent('PreToolUse', action.type);
+        if (preHooks.length > 0) {
+            const input: HookInput = {
+                event: 'PreToolUse',
+                toolName: action.type,
+                toolArgs: action.payload,
+                filePath: action.payload?.path,
+                timestamp: Date.now(),
+            };
+            const preResult = await this.hookRunner.runHooks(preHooks, input);
+            if (!preResult.allowed) {
+                throw new Error(`Operation blocked by PreToolUse hook: ${preResult.results.find(r => r.blocked)?.stderr || 'Hook denied execution'}`);
+            }
+        }
+
+        // Execute the actual action
+        let result: string;
         switch (action.type) {
             case 'write':
-                return await this.writeFile(action.payload.path, action.payload.content);
+                result = await this.writeFile(action.payload.path, action.payload.content);
+                break;
             case 'multi_write':
-                return await this.multiWrite(action.payload as MultiWritePayload);
+                result = await this.multiWrite(action.payload as MultiWritePayload);
+                break;
             case 'read':
-                return await this.readFile(action.payload.path);
+                result = await this.readFile(action.payload.path);
+                break;
             case 'run':
-                return await this.runTerminal(action.payload.command);
+                result = await this.runTerminal(action.payload.command);
+                break;
             case 'delete':
-                return await this.deleteFile(action.payload.path);
+                result = await this.deleteFile(action.payload.path);
+                break;
             case 'mcp_tool':
-                return `[MCP Tool] ${action.payload.toolName}: Delegated to MCP client`;
+                result = `[MCP Tool] ${action.payload.toolName}: Delegated to MCP client`;
+                break;
             case 'browser':
-                return `[Browser] ${action.payload.type}: Delegated to browser service`;
+                result = await this.executeBrowserAction(action.payload);
+                break;
             default:
                 throw new Error(`Unsupported action type: ${action.type}`);
         }
+
+        // PostToolUse hook
+        const postHooks = this.hookConfigLoader.getHooksForEvent('PostToolUse', action.type);
+        if (postHooks.length > 0) {
+            const postInput: HookInput = {
+                event: 'PostToolUse',
+                toolName: action.type,
+                toolArgs: { ...action.payload, result },
+                filePath: action.payload?.path,
+                timestamp: Date.now(),
+            };
+            await this.hookRunner.runHooks(postHooks, postInput);
+            // PostToolUse hooks don't block, just notify
+        }
+
+        return result;
     }
 
     private async writeFile(path: string, content: string): Promise<string> {
@@ -494,6 +555,42 @@ export class Executor {
                 reject(error instanceof Error ? error : new Error('Unknown error'));
             }
         });
+    }
+
+    /**
+     * Execute a browser automation action via BrowserService.
+     */
+    private async executeBrowserAction(payload: any): Promise<string> {
+        const settings = getSettings();
+        if (!settings.enableBrowser) {
+            return '[Browser] Browser automation is disabled. Enable it in settings (tokamak.enableBrowser).';
+        }
+
+        const action = parseBrowserAction(payload);
+        if (!action) {
+            return `[Browser] Invalid browser action payload: ${JSON.stringify(payload)}`;
+        }
+
+        // Lazy-init: launch browser on first use
+        if (!this.browserService) {
+            this.browserService = new BrowserService();
+        }
+        if (!this.browserService.isRunning() && action.type !== 'close') {
+            try {
+                await this.browserService.launch();
+            } catch (err: any) {
+                return `[Browser] Failed to launch browser: ${err?.message ?? String(err)}. Ensure puppeteer-core is installed and a compatible browser is available.`;
+            }
+        }
+
+        const result = await this.browserService.execute(action);
+
+        // Clean up after close action
+        if (action.type === 'close') {
+            this.browserService = null;
+        }
+
+        return formatBrowserResult(result);
     }
 
     /**

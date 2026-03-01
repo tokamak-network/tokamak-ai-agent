@@ -26,7 +26,11 @@ export class DependencyAnalyzer {
             const content = await vscode.workspace.fs.readFile(fileUri);
             const text = Buffer.from(content).toString('utf8');
 
-            const imports = this.extractImports(text, path);
+            // Try AST-based extraction first, fall back to regex
+            let imports = await this.extractImportsWithAST(text, path);
+            if (!imports) {
+                imports = this.extractImports(text, path);
+            }
             const exports = this.extractExports(text);
 
             return {
@@ -67,6 +71,33 @@ export class DependencyAnalyzer {
         }
 
         return graph;
+    }
+
+    /**
+     * Try to extract imports using tree-sitter AST (more accurate than regex).
+     * Falls back to regex if tree-sitter is not available.
+     */
+    private async extractImportsWithAST(content: string, filePath: string): Promise<string[] | null> {
+        try {
+            const { TreeSitterService } = await import('../ast/treeSitterService.js');
+            const { DefinitionExtractor } = await import('../ast/definitionExtractor.js');
+            const service = TreeSitterService.getInstance();
+            if (!service.isInitialized()) return null;
+            const ext = '.' + filePath.split('.').pop();
+            const language = service.getLanguageFromExtension(ext);
+            if (!language) return null;
+            const extractor = new DefinitionExtractor(service);
+            const outline = await extractor.getFileOutline(content, filePath, language);
+            const imports: string[] = [];
+            for (const imp of outline.imports) {
+                if (imp.module.startsWith('.')) {
+                    imports.push(imp.module);
+                }
+            }
+            return imports.length > 0 ? imports : null;
+        } catch {
+            return null;
+        }
     }
 
     /**

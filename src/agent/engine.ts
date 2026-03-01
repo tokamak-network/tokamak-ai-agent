@@ -23,6 +23,9 @@ import { analyzeTerminalOutput, formatErrorsForPrompt } from './terminalOutputPa
 import { DiagnosticDiffTracker } from './diagnosticDiffTracker.js';
 import { shouldAutoApprove, classifyOperation } from '../approval/autoApproval.js';
 import { needsCompression, compressMessages } from '../context/contextCompressor.js';
+import { HookConfigLoader } from '../hooks/hookConfigLoader.js';
+import { HookRunner } from '../hooks/hookRunner.js';
+import type { HookInput } from '../hooks/hookTypes.js';
 
 /**
  * AI 응답 텍스트에서 가장 바깥쪽 JSON 객체를 올바르게 추출합니다.
@@ -86,6 +89,9 @@ export class AgentEngine {
     private checkpointManager: CheckpointManager | null = null;
     private lastDiagnostics: DiagnosticInfo[] = [];
     private diagnosticDiffTracker: DiagnosticDiffTracker = new DiagnosticDiffTracker();
+    private hookConfigLoader: HookConfigLoader = new HookConfigLoader();
+    private hookRunner: HookRunner = new HookRunner();
+    private engineHooksInitialized: boolean = false;
 
     constructor(context: AgentContext) {
         this.context = context;
@@ -100,6 +106,15 @@ export class AgentEngine {
             });
         } else if (!isCheckpointsEnabled()) {
             logger.info('[AgentEngine]', 'Checkpoints disabled in settings');
+        }
+    }
+
+    private async ensureEngineHooksLoaded(): Promise<void> {
+        if (!this.engineHooksInitialized) {
+            try {
+                await this.hookConfigLoader.loadConfig();
+                this.engineHooksInitialized = true;
+            } catch { /* hooks not configured */ }
         }
     }
 
@@ -406,6 +421,26 @@ ${directFileContext}
                 const actionCommand = action.payload?.command;
                 const autoApproved = shouldAutoApprove(approvalConfig, actionCategory, actionFilePath, undefined, actionCommand);
 
+                // PreApproval hook — allows external hooks to block actions
+                await this.ensureEngineHooksLoaded();
+                const preApprovalHooks = this.hookConfigLoader.getHooksForEvent('PreApproval', action.type);
+                if (preApprovalHooks.length > 0) {
+                    const hookInput: HookInput = {
+                        event: 'PreApproval',
+                        toolName: action.type,
+                        toolArgs: action.payload,
+                        filePath: actionFilePath,
+                        timestamp: Date.now(),
+                    };
+                    const hookResult = await this.hookRunner.runHooks(preApprovalHooks, hookInput);
+                    if (!hookResult.allowed) {
+                        logger.warn('[AgentEngine]', `Action blocked by PreApproval hook: ${action.type}`);
+                        step.result = `Action blocked by PreApproval hook: ${hookResult.results.find(r => r.blocked)?.stderr || 'Hook denied execution'}`;
+                        this.state = 'Reflecting';
+                        return;
+                    }
+                }
+
                 if (!autoApproved && approvalConfig.enabled && actionCategory !== 'read_file' && actionCategory !== 'search') {
                     logger.info('[AgentEngine]', `Action requires approval: ${action.type} ${actionFilePath || actionCommand || ''}`);
                 }
@@ -430,6 +465,19 @@ ${directFileContext}
                         logger.info('[AgentEngine]', `Terminal errors detected (${analysis.errors.length}): ${analysis.suggestedAction}`);
                         step.result = `${result}\n\n--- Parsed Errors ---\n${formattedErrors}`;
                     }
+                }
+
+                // PostApproval hook — notify after successful execution
+                const postApprovalHooks = this.hookConfigLoader.getHooksForEvent('PostApproval', action.type);
+                if (postApprovalHooks.length > 0) {
+                    const postHookInput: HookInput = {
+                        event: 'PostApproval',
+                        toolName: action.type,
+                        toolArgs: { ...action.payload, result },
+                        filePath: actionFilePath,
+                        timestamp: Date.now(),
+                    };
+                    await this.hookRunner.runHooks(postApprovalHooks, postHookInput);
                 }
 
                 // 실행 결과를 메시지로 표시

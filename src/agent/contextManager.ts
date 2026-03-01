@@ -46,11 +46,35 @@ export class ContextManager {
                     contextParts.push(`--- FILE: ${file.path} (Full, Score: ${file.score}) ---\n${content}\n`);
                     currentEstimatedTokens += estimatedTokens;
                 } else if (currentEstimatedTokens < maxTokens) {
-                    // 크기가 크거나 예산이 아슬아슬하면 요약본 포함
-                    logger.info('[ContextManager]', `Summarizing heavy file: ${file.path}`);
-                    const summary = await this.summarizer.summarize(file.path, content);
-                    contextParts.push(`--- FILE: ${file.path} (Summary, Score: ${file.score}) ---\n${summary}\n`);
-                    currentEstimatedTokens += summary.length / 3;
+                    // Try AST outline first (cheaper than AI summarization)
+                    let outlineUsed = false;
+                    try {
+                        const { TreeSitterService } = await import('../ast/treeSitterService.js');
+                        const { DefinitionExtractor } = await import('../ast/definitionExtractor.js');
+                        const service = TreeSitterService.getInstance();
+                        if (service.isInitialized()) {
+                            const ext = '.' + file.path.split('.').pop();
+                            const language = service.getLanguageFromExtension(ext);
+                            if (language) {
+                                const extractor = new DefinitionExtractor(service);
+                                const outline = await extractor.getFileOutline(content, file.path, language);
+                                if (outline.definitions.length > 0) {
+                                    const formatted = extractor.formatOutlineForPrompt(outline);
+                                    contextParts.push(`--- FILE: ${file.path} (AST Outline, Score: ${file.score}) ---\n${formatted}\n`);
+                                    currentEstimatedTokens += formatted.length / 3;
+                                    outlineUsed = true;
+                                }
+                            }
+                        }
+                    } catch { /* tree-sitter not available */ }
+
+                    if (!outlineUsed) {
+                        // Fall back to AI summarization
+                        logger.info('[ContextManager]', `Summarizing heavy file: ${file.path}`);
+                        const summary = await this.summarizer.summarize(file.path, content);
+                        contextParts.push(`--- FILE: ${file.path} (Summary, Score: ${file.score}) ---\n${summary}\n`);
+                        currentEstimatedTokens += summary.length / 3;
+                    }
                 } else {
                     logger.warn('[ContextManager]', `Token budget exhausted (${Math.round(currentEstimatedTokens)}/${maxTokens}), skipping: ${file.path}`);
                     contextParts.push(`--- FILE: ${file.path} (Skipped — token budget exhausted, Score: ${file.score}) ---\n`);

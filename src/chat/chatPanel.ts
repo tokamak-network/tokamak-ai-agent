@@ -1779,6 +1779,28 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             ];
         }
 
+        // PreMessage hook
+        try {
+            const preMessageHooks = this.hookConfigLoader.getHooksForEvent('PreMessage');
+            if (preMessageHooks.length > 0) {
+                const hookInput = {
+                    event: 'PreMessage' as const,
+                    message: typeof content === 'string' ? content : JSON.stringify(content),
+                    timestamp: Date.now(),
+                };
+                const hookResult = await this.hookRunner.runHooks(preMessageHooks, hookInput);
+                if (!hookResult.allowed) {
+                    this.panel.webview.postMessage({
+                        command: 'addMessage',
+                        role: 'assistant',
+                        content: '⚠️ Message blocked by PreMessage hook.',
+                    });
+                    this.panel.webview.postMessage({ command: 'endStreaming' });
+                    return;
+                }
+            }
+        } catch { /* hooks not configured */ }
+
         this.chatHistory.push({ role: 'user', content: content });
 
         // 첨부된 파일 내용을 채팅창에 표시
@@ -1962,6 +1984,20 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
                 if (signal.aborted) break;
 
                 this.chatHistory.push({ role: 'assistant', content: fullResponse });
+
+                // PostMessage hook
+                try {
+                    const postMessageHooks = this.hookConfigLoader.getHooksForEvent('PostMessage');
+                    if (postMessageHooks.length > 0) {
+                        const hookInput = {
+                            event: 'PostMessage' as const,
+                            message: fullResponse,
+                            timestamp: Date.now(),
+                        };
+                        await this.hookRunner.runHooks(postMessageHooks, hookInput);
+                    }
+                } catch { /* hooks not configured */ }
+
                 needsMoreContext = false;
 
                 // [Phase 1 통합] Plan 모드인 경우 AgentEngine에 전달

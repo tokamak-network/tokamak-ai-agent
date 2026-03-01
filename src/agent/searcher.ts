@@ -36,6 +36,43 @@ export class Searcher {
             await this.searchInFileContents(keyword, results);
         }
 
+        // 2-3. AST definition name matching (highest weight for exact symbol matches)
+        try {
+            const { TreeSitterService } = await import('../ast/treeSitterService.js');
+            const { DefinitionExtractor } = await import('../ast/definitionExtractor.js');
+            const service = TreeSitterService.getInstance();
+            if (service.isInitialized()) {
+                const extractor = new DefinitionExtractor(service);
+                // Search code files for definition names matching keywords
+                const codeFiles = await vscode.workspace.findFiles(
+                    '**/*.{ts,tsx,js,jsx,py,go}',
+                    '**/node_modules/**',
+                    20
+                );
+                for (const uri of codeFiles) {
+                    try {
+                        const stat = await vscode.workspace.fs.stat(uri);
+                        if (stat.size > 200000) continue; // Skip large files
+                        const ext = '.' + uri.fsPath.split('.').pop();
+                        const language = service.getLanguageFromExtension(ext);
+                        if (!language) continue;
+                        const data = await vscode.workspace.fs.readFile(uri);
+                        const code = Buffer.from(data).toString('utf8');
+                        const definitions = await extractor.extractDefinitions(code, vscode.workspace.asRelativePath(uri), language);
+                        for (const def of definitions) {
+                            for (const kw of keywords) {
+                                if (def.name.toLowerCase().includes(kw.toLowerCase())) {
+                                    const relPath = vscode.workspace.asRelativePath(uri);
+                                    this.updateScore(results, relPath, 15, `AST definition: ${def.name}`);
+                                    break;
+                                }
+                            }
+                        }
+                    } catch { continue; }
+                }
+            }
+        } catch { /* tree-sitter not available */ }
+
         // 3. 확장자 기반 중요도 필터링 (.ts, .js, .md 선호)
         for (const [filePath, meta] of results) {
             if (filePath.endsWith('.ts') || filePath.endsWith('.tsx')) {
