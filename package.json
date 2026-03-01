@@ -99,15 +99,120 @@
         },
         "tokamak.agentStrategy": {
           "type": "string",
-          "enum": ["review", "red-team"],
+          "enum": [
+            "review",
+            "red-team"
+          ],
           "default": "review",
           "description": "Strategy for multi-model code review in Agent mode. 'review' uses structured critique/rebuttal, 'red-team' uses adversarial security analysis."
         },
         "tokamak.planStrategy": {
           "type": "string",
-          "enum": ["debate", "perspectives"],
+          "enum": [
+            "debate",
+            "perspectives"
+          ],
           "default": "debate",
           "description": "Strategy for multi-model plan debate. 'debate' uses structured challenge/defense, 'perspectives' uses risk/innovation lens analysis."
+        },
+        "tokamak.autoApproval.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable auto-approval for agent operations. When enabled, certain operations are executed without manual confirmation."
+        },
+        "tokamak.autoApproval.tools.read_file": {
+          "type": "string",
+          "enum": [
+            "always_allow",
+            "ask",
+            "deny"
+          ],
+          "default": "always_allow",
+          "description": "Approval level for file read operations"
+        },
+        "tokamak.autoApproval.tools.write_file": {
+          "type": "string",
+          "enum": [
+            "always_allow",
+            "ask",
+            "deny"
+          ],
+          "default": "ask",
+          "description": "Approval level for file write operations"
+        },
+        "tokamak.autoApproval.tools.create_file": {
+          "type": "string",
+          "enum": [
+            "always_allow",
+            "ask",
+            "deny"
+          ],
+          "default": "ask",
+          "description": "Approval level for file creation operations"
+        },
+        "tokamak.autoApproval.tools.delete_file": {
+          "type": "string",
+          "enum": [
+            "always_allow",
+            "ask",
+            "deny"
+          ],
+          "default": "ask",
+          "description": "Approval level for file deletion operations"
+        },
+        "tokamak.autoApproval.tools.terminal_command": {
+          "type": "string",
+          "enum": [
+            "always_allow",
+            "ask",
+            "deny"
+          ],
+          "default": "ask",
+          "description": "Approval level for terminal command execution"
+        },
+        "tokamak.autoApproval.tools.search": {
+          "type": "string",
+          "enum": [
+            "always_allow",
+            "ask",
+            "deny"
+          ],
+          "default": "always_allow",
+          "description": "Approval level for search operations"
+        },
+        "tokamak.autoApproval.allowedPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Glob patterns for paths that are always auto-approved (e.g., 'src/**/*.ts')"
+        },
+        "tokamak.autoApproval.protectedPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Glob patterns for paths that always require manual confirmation (e.g., '.env', '*.key')"
+        },
+        "tokamak.autoApproval.maxAutoApproveFileSize": {
+          "type": "number",
+          "default": 1048576,
+          "description": "Maximum file size (bytes) for auto-approval. Files larger than this always require confirmation."
+        },
+        "tokamak.autoApproval.allowedCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Command patterns that may be auto-approved (supports * wildcard, e.g., 'npm test', 'npm run *')"
+        },
+        "tokamak.enableBrowser": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable browser automation actions (requires puppeteer-core)"
         }
       }
     },
@@ -139,6 +244,14 @@
       {
         "command": "tokamak.initKnowledge",
         "title": "Tokamak: Initialize Project Knowledge Folder"
+      },
+      {
+        "command": "tokamak.configureMcp",
+        "title": "Tokamak: Configure MCP Servers"
+      },
+      {
+        "command": "tokamak.initRules",
+        "title": "Tokamak: Initialize Rules Folder"
       }
     ],
     "keybindings": [
@@ -191,6 +304,8 @@
     "vitest": "^2.1.9"
   },
   "dependencies": {
-    "openai": "^4.24.0"
+    "openai": "^4.24.0",
+    "web-tree-sitter": "^0.26.6",
+    "yaml": "^2.8.2"
   }
 }
