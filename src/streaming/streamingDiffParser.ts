@@ -59,6 +59,25 @@ export class StreamingDiffParser {
     }
 
     /**
+     * Flush remaining buffered content when the stream ends.
+     * Must be called after the last chunk to emit any held-back text.
+     */
+    flush(): FeedResult {
+        const remaining = this.buffer;
+        this.buffer = '';
+
+        if (this.insideOperation) {
+            this.consumeOperationLines(remaining);
+            const op = this.currentOp ? { ...this.currentOp } : null;
+            this.insideOperation = false;
+            this.currentOp = null;
+            return { textContent: '', operation: op };
+        }
+
+        return { textContent: remaining, operation: null };
+    }
+
+    /**
      * Get current partial operation if any.
      */
     getCurrentOperation(): PartialOperation | null {

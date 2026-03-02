@@ -2,11 +2,13 @@
  * F12: Browser Automation — Service
  *
  * Browser lifecycle management.
- * Uses puppeteer-core via dynamic import so the extension does not hard-depend
- * on it at compile time.
+ * puppeteer-core is marked as --external in esbuild and resolved from
+ * node_modules at runtime via require().
  */
 
 import type { BrowserAction, BrowserConfig, BrowserResult } from './browserTypes.js';
+import * as path from 'path';
+import * as fs from 'fs';
 
 const DEFAULT_CONFIG: BrowserConfig = {
     enabled: true,
@@ -14,6 +16,44 @@ const DEFAULT_CONFIG: BrowserConfig = {
     defaultTimeout: 30_000,
     viewport: { width: 1280, height: 720 },
 };
+
+/**
+ * Auto-detect a Chrome/Chromium executable on the system.
+ * Returns the first existing path, or undefined if none found.
+ */
+function findChromeExecutable(): string | undefined {
+    const candidates: string[] = [];
+
+    if (process.platform === 'darwin') {
+        candidates.push(
+            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+            '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        );
+    } else if (process.platform === 'win32') {
+        const programFiles = process.env['PROGRAMFILES'] || 'C:\\Program Files';
+        const programFilesX86 = process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
+        const localAppData = process.env['LOCALAPPDATA'] || '';
+        candidates.push(
+            path.join(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            path.join(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+            path.join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        );
+    } else {
+        // Linux
+        candidates.push(
+            '/usr/bin/google-chrome',
+            '/usr/bin/google-chrome-stable',
+            '/usr/bin/chromium',
+            '/usr/bin/chromium-browser',
+            '/snap/bin/chromium',
+        );
+    }
+
+    return candidates.find(p => {
+        try { return fs.existsSync(p); } catch { return false; }
+    });
+}
 
 export class BrowserService {
     private browser: any = null;   // puppeteer Browser instance
@@ -32,21 +72,35 @@ export class BrowserService {
             return; // already launched
         }
 
-        // Dynamic import so puppeteer-core is only resolved at runtime.
-        // The module name is constructed via a variable to prevent TypeScript
-        // from attempting compile-time resolution (puppeteer-core is optional).
-        const moduleName = 'puppeteer-core';
-        const puppeteer = await import(/* webpackIgnore: true */ moduleName);
+        // require() works in the CJS bundle because puppeteer-core is
+        // marked --external in esbuild and shipped in node_modules.
+        let puppeteer: any;
+        try {
+            puppeteer = require('puppeteer-core');
+        } catch (err: any) {
+            throw new Error(
+                `puppeteer-core is not installed. ` +
+                `Run "npm install puppeteer-core" in the extension directory. ` +
+                `(${err?.message ?? err})`
+            );
+        }
         const launchFn = puppeteer.default?.launch ?? puppeteer.launch;
+
+        // Determine Chrome executable path
+        const executablePath = this.config.executablePath || findChromeExecutable();
+        if (!executablePath) {
+            throw new Error(
+                `Could not find Chrome/Chromium on your system. ` +
+                `Please install Google Chrome or set "tokamak.browserExecutablePath" in VS Code settings.`
+            );
+        }
 
         const launchOptions: Record<string, any> = {
             headless: this.config.headless,
             defaultViewport: this.config.viewport,
+            executablePath,
             args: ['--no-sandbox', '--disable-setuid-sandbox'],
         };
-        if (this.config.executablePath) {
-            launchOptions.executablePath = this.config.executablePath;
-        }
 
         this.browser = await launchFn(launchOptions);
         this.page = await this.browser.newPage();

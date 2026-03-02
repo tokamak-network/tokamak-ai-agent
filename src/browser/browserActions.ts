@@ -115,6 +115,34 @@ export function formatBrowserResult(result: BrowserResult): string {
 }
 
 /**
+ * Parse browser action blocks from an AI response.
+ * Looks for <<<BROWSER_ACTION>>> ... <<<END_BROWSER_ACTION>>> wrappers.
+ * Returns parsed BrowserAction objects.
+ */
+export function parseBrowserActionsFromResponse(text: string): BrowserAction[] {
+    const actions: BrowserAction[] = [];
+    const regex = /<<<BROWSER_ACTION>>>\s*([\s\S]*?)<<<END_BROWSER_ACTION>>>/gi;
+    let match;
+
+    while ((match = regex.exec(text)) !== null) {
+        const jsonStr = match[1].trim();
+        try {
+            // Strip markdown code fences if present
+            const cleaned = jsonStr.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+            const parsed = JSON.parse(cleaned);
+            const action = parseBrowserAction(parsed);
+            if (action) {
+                actions.push(action);
+            }
+        } catch {
+            // Invalid JSON, skip this block
+        }
+    }
+
+    return actions;
+}
+
+/**
  * Get browser action documentation for system prompt injection.
  * Describes the available actions and their JSON format for the AI model.
  */
@@ -123,44 +151,39 @@ export function getBrowserActionDocs(): string {
 
 You can control a headless browser to navigate web pages, take screenshots, click elements, type text, and run JavaScript.
 
+### Format
+
+Wrap each action in <<<BROWSER_ACTION>>> / <<<END_BROWSER_ACTION>>> tags:
+
+<<<BROWSER_ACTION>>>
+{ "type": "navigate", "url": "https://example.com" }
+<<<END_BROWSER_ACTION>>>
+
 ### Available Actions
 
-Send a browser action as a JSON object with a "type" field:
-
 1. **navigate** — Go to a URL
-   \`\`\`json
    { "type": "navigate", "url": "https://example.com" }
-   \`\`\`
 
 2. **screenshot** — Capture the page or a specific element
-   \`\`\`json
    { "type": "screenshot" }
    { "type": "screenshot", "selector": "#main-content" }
-   \`\`\`
 
 3. **click** — Click an element by CSS selector
-   \`\`\`json
    { "type": "click", "selector": "button.submit" }
-   \`\`\`
 
 4. **type** — Type text into an input element
-   \`\`\`json
    { "type": "type", "selector": "input[name='search']", "text": "hello world" }
-   \`\`\`
 
 5. **evaluate** — Run JavaScript in the page context
-   \`\`\`json
    { "type": "evaluate", "script": "document.title" }
-   \`\`\`
 
 6. **close** — Close the browser
-   \`\`\`json
    { "type": "close" }
-   \`\`\`
 
 ### Tips
 - Always **navigate** to a URL before performing other actions.
 - Use **screenshot** to visually verify page state.
 - CSS selectors should be specific enough to uniquely identify elements.
-- The **evaluate** action returns the result of the last expression in the script.`;
+- The **evaluate** action returns the result of the last expression in the script.
+- You can chain multiple actions by using multiple <<<BROWSER_ACTION>>> blocks.`;
 }

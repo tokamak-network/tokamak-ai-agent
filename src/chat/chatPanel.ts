@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { streamChatCompletion, ChatMessage, isVisionCapable } from '../api/client.js';
-import { isConfigured, promptForConfiguration, getAvailableModels, getSelectedModel, setSelectedModel, isCheckpointsEnabled, getEnableMultiModelReview, setEnableMultiModelReview, getReviewerModel, setReviewerModel, getCriticModel, setCriticModel, getMaxReviewIterations, getMaxDebateIterations, getAgentStrategy, setAgentStrategy, getPlanStrategy, setPlanStrategy, getAutoApprovalConfig } from '../config/settings.js';
+import { isConfigured, promptForConfiguration, getAvailableModels, getSelectedModel, setSelectedModel, isCheckpointsEnabled, getEnableMultiModelReview, setEnableMultiModelReview, getReviewerModel, setReviewerModel, getCriticModel, setCriticModel, getMaxReviewIterations, getMaxDebateIterations, getAgentStrategy, setAgentStrategy, getPlanStrategy, setPlanStrategy, getAutoApprovalConfig, getSettings } from '../config/settings.js';
 import { AgentEngine } from '../agent/engine.js';
 import { AgentContext, AgentStrategy, PlanStrategy } from '../agent/types.js';
 import {
@@ -26,7 +26,8 @@ import { HookConfigLoader } from '../hooks/hookConfigLoader.js';
 import { HookRunner } from '../hooks/hookRunner.js';
 import { StreamingDiffParser } from '../streaming/streamingDiffParser.js';
 import { AutoCollector } from '../knowledge/autoCollector.js';
-import { getBrowserActionDocs } from '../browser/browserActions.js';
+import { getBrowserActionDocs, parseBrowserActionsFromResponse, parseBrowserAction, formatBrowserResult } from '../browser/browserActions.js';
+import { BrowserService } from '../browser/browserService.js';
 import { DiagnosticDiffTracker } from '../agent/diagnosticDiffTracker.js';
 
 
@@ -73,6 +74,9 @@ export class ChatPanel {
     private diagnosticDiffTracker: DiagnosticDiffTracker = new DiagnosticDiffTracker();
     private isAutoFixing: boolean = false;
     private deferredDiagnosticWatcher: vscode.Disposable | null = null;
+
+    // --- F12: Browser automation ---
+    private browserService: BrowserService | null = null;
 
     public static setContext(context: vscode.ExtensionContext): void {
         ChatPanel.extensionContext = context;
@@ -2219,14 +2223,10 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
             } catch { /* MCP not configured */ }
 
             // Browser action docs (if enabled)
-            const settings = getAutoApprovalConfig();
             let browserDocs = '';
-            try {
-                const { getSettings } = await import('../config/settings.js');
-                if (getSettings().enableBrowser) {
-                    browserDocs = getBrowserActionDocs();
-                }
-            } catch { /* browser not enabled */ }
+            if (getSettings().enableBrowser) {
+                browserDocs = getBrowserActionDocs();
+            }
 
             // Auto-collect project knowledge
             let autoKnowledge = '';
@@ -2316,6 +2316,12 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
                     }
                 }
 
+                // Flush any remaining buffered content from the diff parser
+                const flushResult = this.streamingDiffParser.flush();
+                if (flushResult.textContent) {
+                    this.panel.webview.postMessage({ command: 'streamChunk', content: flushResult.textContent });
+                }
+
                 // Get token usage after streaming completes
                 const usage = await streamResult.usage;
                 if (usage) {
@@ -2385,6 +2391,53 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
                         continue;
                     }
                 } catch { /* MCP parsing failed, continue normally */ }
+
+                // Handle browser actions in response
+                try {
+                    const browserActions = parseBrowserActionsFromResponse(fullResponse);
+                    if (browserActions.length > 0) {
+                        needsMoreContext = true;
+                        let browserResults = '\n--- Browser Action Results ---\n';
+
+                        for (const action of browserActions) {
+                            this.panel.webview.postMessage({
+                                command: 'addMessage',
+                                role: 'assistant',
+                                content: `🌐 *Browser: ${action.type}${action.type === 'navigate' ? ' → ' + action.url : ''}*`,
+                            });
+
+                            try {
+                                // Lazy-init browser service
+                                if (!this.browserService) {
+                                    this.browserService = new BrowserService();
+                                }
+                                if (!this.browserService.isRunning() && action.type !== 'close') {
+                                    await this.browserService.launch();
+                                }
+
+                                const result = await this.browserService.execute(action);
+                                browserResults += formatBrowserResult(result) + '\n';
+
+                                if (action.type === 'close') {
+                                    this.browserService = null;
+                                }
+                            } catch (err: any) {
+                                const errMsg = err?.message ?? String(err);
+                                browserResults += `[Browser] ${action.type}: Error — ${errMsg}\n`;
+                                logger.error('[ChatPanel]', `Browser action failed: ${action.type}`, err);
+
+                                // If launch failed, provide helpful message
+                                if (errMsg.includes('Cannot find module') || errMsg.includes('puppeteer')) {
+                                    browserResults += '[Browser] puppeteer-core is not installed. Run: npm install puppeteer-core\n';
+                                }
+                            }
+                        }
+
+                        this.chatHistory.push({ role: 'user', content: browserResults });
+                        this.panel.webview.postMessage({ command: 'startStreaming' });
+                        continue;
+                    }
+                } catch { /* Browser action parsing failed, continue normally */ }
 
                 // In agent or ask mode, parse file operations
                 const operations = parseFileOperations(fullResponse);
@@ -2671,6 +2724,8 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
         // Clean up subsystems
         this.diagnosticDiffTracker.reset();
         this.deferredDiagnosticWatcher?.dispose();
+        this.browserService?.close().catch(() => {});
+        this.browserService = null;
         this.ruleLoader.dispose();
         this.mcpConfigManager.dispose();
         this.hookConfigLoader.dispose();

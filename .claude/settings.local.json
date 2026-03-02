@@ -29,7 +29,10 @@
       "Bash(npm run copy:parsers 2>&1 && ls -lh parsers/)",
       "Bash(npx vitest run src/__tests__/treeSitter.test.ts 2>&1)",
       "Bash(npx tsc --noEmit 2>&1 | tail -5 && npm test 2>&1 | tail -5)",
-      "Bash(find /Users/harvey/Desktop/project/2026/trackB/tokamak-agent/src/__tests__ -type f -name \"*.test.ts\" | xargs ls -la)"
+      "Bash(find /Users/harvey/Desktop/project/2026/trackB/tokamak-agent/src/__tests__ -type f -name \"*.test.ts\" | xargs ls -la)",
+      "Bash(find /Users/harvey/Desktop/project/2026/trackB/tokamak-agent -name \"*.test.ts\" -o -name \"*.spec.ts\" 2>/dev/null | xargs grep -l \"streamingDiffParser\\\\|autoCollector\\\\|browserService\\\\|browser\" 2>/dev/null)",
+      "Bash(npm ls puppeteer-core --all 2>&1 | head -20)",
+      "Bash(npm ls puppeteer-core --all --production 2>&1 | grep -v \"deduped\")"
     ]
   }
 }

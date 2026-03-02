@@ -287,7 +287,7 @@
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts",
     "copy:parsers": "node scripts/copy-parsers.mjs",
-    "bundle": "rm -rf out && esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node && npm run copy:parsers",
+    "bundle": "rm -rf out && esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --external:puppeteer-core --format=cjs --platform=node && npm run copy:parsers",
     "bundle-watch": "npm run bundle -- --watch",
     "package": "npm run bundle && vsce package",
     "test": "vitest run"
@@ -307,6 +307,7 @@
   },
   "dependencies": {
     "openai": "^4.24.0",
+    "puppeteer-core": "^24.37.5",
     "web-tree-sitter": "^0.20.8",
     "yaml": "^2.8.2"
   }
