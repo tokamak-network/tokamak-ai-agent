@@ -1,25 +1,46 @@
 # Tokamak AI Agent
 
-회사 자체 AI 모델(LiteLLM 기반 OpenAI 호환 API)을 VS Code에서 사용할 수 있는 Extension입니다.
+사내 AI 모델(LiteLLM 기반 OpenAI 호환 API)을 VS Code에서 바로 사용할 수 있는 코딩 어시스턴트 익스텐션입니다. 자율 에이전트, 멀티 모델 리뷰, 확장 가능한 도구 시스템을 지원합니다.
+
+**버전:** 0.1.3 | **테스트:** 297개 | **지원 모델:** Qwen, GLM, Minimax, OpenAI, Claude, Gemini
 
 ---
 
 ## 빠른 시작 (설치 방법)
 
 ### 1. VSIX 파일을 통한 설치
-소스 코드를 직접 빌드하지 않고, 빌드된 파일을 사용하여 간편하게 설치할 수 있습니다.
 
-1. [GitHub Releases](https://github.com/tokamak-network/tokamak-ai-agent/releases) 페이지에서 최신 버전의 `.vsix` 파일을 다운로드합니다.
+1. [GitHub Releases](https://github.com/tokamak-network/tokamak-ai-agent/releases) 페이지에서 최신 `.vsix` 파일을 다운로드합니다.
 2. VS Code에서 **확장 프로그램** 보기(`Cmd+Shift+X`)를 엽니다.
-3. 확장 프로그램 탭 상단 우측의 **기타 작업...** (점 세 개 모 모양) 메뉴를 클릭합니다.
-4. **VSIX에서 설치...(Install from VSIX...)**를 선택합니다.
-5. 다운로드한 `.vsix` 파일을 선택하여 설치를 완료합니다.
+3. 상단 우측의 **기타 작업...** (점 세 개) 메뉴를 클릭합니다.
+4. **VSIX에서 설치...**를 선택합니다.
+5. 다운로드한 `.vsix` 파일을 선택합니다.
+
+### 2. 소스 코드 빌드 (개발자용)
+
+```bash
+# 의존성 설치
+npm install
+
+# 테스트 실행 (297개)
+npm test
+
+# 번들 빌드
+npm run bundle
+
+# VSIX 패키징
+npm run package
+
+# 또는 VS Code에서 F5로 디버그 실행
+```
 
 ---
 
 ## API 설정
 
 `Cmd+,` (Mac) / `Ctrl+,` (Windows)로 설정을 열고 `tokamak`을 검색합니다.
+
+### 기본 설정
 
 | 설정 | 설명 | 필수 |
 |------|------|:----:|
@@ -29,6 +50,19 @@
 | `tokamak.enableInlineCompletion` | Ghost Text 자동완성 활성화 | - |
 | `tokamak.completionDebounceMs` | 자동완성 딜레이 (기본 300ms) | - |
 
+### 에이전트 & 자동화 설정
+
+| 설정 | 설명 | 기본값 |
+|------|------|:----:|
+| `tokamak.enableCheckpoints` | 체크포인트 저장/복원 | `false` |
+| `tokamak.enableMultiModelReview` | 멀티 모델 코드 리뷰 | `false` |
+| `tokamak.enableBrowser` | 브라우저 자동화 | `false` |
+| `tokamak.autoApproval.enabled` | 에이전트 액션 자동 승인 | `false` |
+| `tokamak.autoApproval.tools.*` | 도구별 승인 수준 (always_allow / ask / deny) | 도구별 상이 |
+| `tokamak.autoApproval.allowedPaths` | 자동 승인 경로 (glob 패턴) | `[]` |
+| `tokamak.autoApproval.protectedPaths` | 항상 확인 경로 (glob 패턴) | `[]` |
+| `tokamak.autoApproval.allowedCommands` | 허용된 터미널 명령 패턴 | `[]` |
+
 **settings.json 예시:**
 ```json
 {
@@ -36,190 +70,28 @@
   "tokamak.models": [
     "qwen3-235b",
     "qwen3-80b-next",
-    "qwen3-coder-flash",
     "minimax-m2.5",
-    "glm-4.7"
+    "glm-4.7",
+    "gpt-4o",
+    "claude-sonnet-4-20250514",
+    "gemini-2.0-flash"
   ],
-  "tokamak.selectedModel": "qwen3-235b"
+  "tokamak.selectedModel": "qwen3-235b",
+  "tokamak.enableMultiModelReview": true,
+  "tokamak.autoApproval.enabled": true,
+  "tokamak.autoApproval.tools.read_file": "always_allow",
+  "tokamak.autoApproval.tools.write_file": "ask",
+  "tokamak.autoApproval.allowedCommands": ["npm test", "npm run *"]
 }
 ```
 
 ---
 
-## 소스 코드 빌드 (개발자용)
+## 핵심 기능
 
-### 1. Extension 빌드
+### 1. AI 채팅 (3가지 모드)
 
-```bash
-# 의존성 설치
-npm install
-
-# 컴파일
-npm run compile
-```
-
-### 2. 테스트 실행
-
-VS Code에서 프로젝트 폴더를 열고 `F5`를 눌러 Extension Development Host를 실행합니다.
-
-
----
-
-## 기능 사용법
-
-### 1. AI 채팅
-
-**채팅 열기:**
-- 단축키: `Cmd+Shift+I` (Mac) / `Ctrl+Shift+I` (Windows)
-- 또는: `Cmd+Shift+P` → "Tokamak: Open Chat"
-
-채팅창이 에디터 옆에 열려서 코드와 폴더 구조를 함께 볼 수 있습니다.
-
-```
-┌──────────┬─────────────────┬─────────────────┐
-│  📁      │                 │                 │
-│  Explorer│   Code Editor   │  Tokamak AI     │
-│  (폴더)  │                 │  Chat           │
-└──────────┴─────────────────┴─────────────────┘
-```
-
-#### 파일 첨부 (@멘션)
-
-채팅에서 프로젝트 파일을 AI에게 전달할 수 있습니다.
-
-1. 입력창에 `@` 입력
-2. 파일명을 타이핑하면 자동완성 목록 표시
-3. `↑` `↓` 키로 선택
-4. `Enter` 또는 `Tab`으로 첨부
-
-여러 파일을 첨부할 수 있습니다.
-
-```
-┌─────────────────────────────────────┐
-│  📄 extension.ts        src/        │  ← 자동완성
-│  📄 chatPanel.ts        src/chat/   │
-│  📄 client.ts           src/api/    │
-└─────────────────────────────────────┘
-┌─────────────────────────────────────┐
-│ 📄 extension.ts ×  📄 client.ts ×   │  ← 첨부된 파일
-├─────────────────────────────────────┤
-│ 이 두 파일 비교해줘                   │  ← 메시지 입력
-└─────────────────────────────────────┘
-```
-
-- **파일 태그 클릭**: 해당 파일을 에디터에서 열기
-- **× 클릭**: 첨부 해제
-
-#### 자동 컨텍스트
-
-파일을 첨부하지 않으면 **현재 열린 파일**과 **선택한 코드**가 자동으로 AI에게 전달됩니다.
-
-#### 모델 선택
-
-채팅창 상단의 드롭다운에서 모델을 변경할 수 있습니다.
-
-#### 코드 삽입
-
-AI 응답의 코드 블록에서 `Insert` 버튼을 클릭하면 현재 커서 위치에 코드가 삽입됩니다.
-
-#### 터미널 명령 실행
-
-AI 응답의 bash/shell 코드 블록에서 `▶ Run` 버튼을 클릭하면 통합 터미널에서 명령이 실행됩니다.
-
-#### 선택 코드 → 채팅 전송
-
-코드를 선택한 후 우클릭 → **Tokamak: Send to Chat**을 선택하면 선택한 코드가 채팅창에 전송됩니다.
-
-#### 채팅 히스토리
-
-채팅 내용은 자동으로 저장되어 VS Code를 재시작해도 유지됩니다. (프로젝트별 저장)
-
----
-
-### 2. 슬래시 명령어 (Skills)
-
-입력창에서 `/`를 입력하면 사용 가능한 명령어 목록이 표시됩니다.
-
-```
-┌─────────────────────────────────────┐
-│ ⚡ /explain    코드 설명            │
-│ ⚡ /refactor   리팩토링 제안         │
-│ ⚡ /fix        버그 찾기 및 수정     │
-│ ⚡ /test       유닛 테스트 생성      │
-│ ⚡ /docs       문서화               │
-│ ⚡ /optimize   성능 최적화          │
-│ ⚡ /security   보안 감사            │
-└─────────────────────────────────────┘
-```
-
-**사용 예시:**
-- `/explain` - 현재 선택된 코드 또는 열린 파일 설명
-- `/fix 이 함수가 null을 반환해` - 추가 컨텍스트와 함께 버그 수정 요청
-- `/test` - 테스트 코드 자동 생성
-
-#### 커스텀 스킬 만들기
-
-프로젝트에 맞는 커스텀 스킬을 만들 수 있습니다.
-
-**1. 스킬 폴더 초기화:**
-```
-Cmd+Shift+P → "Tokamak: Initialize Skills Folder"
-```
-
-이 명령은 `.tokamak/skills/` 폴더와 기본 스킬 파일들을 생성합니다.
-
-**2. 스킬 파일 구조:**
-```
-프로젝트/
-├── .tokamak/
-│   └── skills/
-│       ├── explain.md      → /explain
-│       ├── refactor.md     → /refactor
-│       ├── my-custom.md    → /my-custom (직접 추가)
-│       └── ...
-```
-
-**3. 스킬 파일 형식:**
-```markdown
----
-description: 스킬 설명 (자동완성에 표시됨)
----
-
-여기에 AI에게 보낼 프롬프트를 작성합니다.
-마크다운 형식을 사용할 수 있습니다.
-
-예시:
-1. 첫 번째 지시사항
-2. 두 번째 지시사항
-```
-
-**4. 예시 - 코드 리뷰 스킬 (`review.md`):**
-```markdown
----
-description: 시니어 개발자 관점 코드 리뷰
----
-
-이 코드를 시니어 개발자 관점에서 리뷰해주세요:
-
-1. 코드 품질 및 베스트 프랙티스
-2. 잠재적 버그나 엣지 케이스
-3. 보안 이슈
-4. 성능 문제
-5. 개선 제안
-
-구체적이고 건설적인 피드백을 제공해주세요.
-```
-
-**장점:**
-- 팀원들과 스킬 공유 (Git으로 관리)
-- 프로젝트별 맞춤 스킬
-- 코드 수정 없이 스킬 추가/수정
-
----
-
-### 3. 채팅 모드
-
-채팅창 상단의 탭에서 3가지 모드를 선택할 수 있습니다.
+**채팅 열기:** `Cmd+Shift+I` (Mac) / `Ctrl+Shift+I` (Windows)
 
 ```
 ┌─────────────────────────────────────┐
@@ -228,67 +100,38 @@ description: 시니어 개발자 관점 코드 리뷰
 ```
 
 #### 💬 Ask 모드 (기본)
-
 코드에 대해 질문하고 답변을 받는 모드입니다.
 
-**사용 예시:**
 - "이 함수가 뭘 하는 거야?"
 - "이 에러 어떻게 해결해?"
 - "React에서 상태 관리 어떻게 해?"
 
-**특징:**
-- 단순 질문/답변
-- 코드 수정 없음
-- 가장 빠른 응답
-
----
-
 #### 📋 Plan 모드
+구현 전에 작업 계획을 세우는 모드입니다. **코드를 직접 작성하지 않습니다.**
 
-구현 전에 작업 계획을 세우는 모드입니다.
-
-**사용 예시:**
 - "사용자 인증 기능을 추가하려고 해. 어떻게 구현할까?"
 - "이 코드를 마이크로서비스로 분리하고 싶어"
-- "테스트 코드를 작성하려면 뭘 해야 해?"
-
-**특징:**
-- 구조화된 계획 제공
-- 단계별 구현 순서
-- 수정할 파일 목록
-- 잠재적 문제점 분석
-- **코드를 직접 작성하지 않음**
-
-**응답 형식:**
-```
-1. Overview (개요)
-2. Steps (구현 단계)
-3. Files to modify/create (파일 목록)
-4. Potential challenges (잠재적 문제)
-5. Testing considerations (테스트 고려사항)
-```
-
----
 
 #### 🤖 Agent 모드
+AI가 자율적으로 작업을 수행하는 모드입니다:
+- **파일 생성/수정/삭제** — diff 미리보기 제공
+- **터미널 명령 실행** — 에러 자동 파싱 및 수정
+- **코드베이스 검색** — AST 기반 스마트 랭킹
+- **외부 도구 사용** — MCP 프로토콜 연동
+- **브라우저 제어** — Puppeteer 기반 자동화
+- **자동 수정** — 진단 피드백 기반 셀프 픽스
 
-AI가 직접 파일을 생성, 수정, 삭제하는 모드입니다.
-
-**사용 예시:**
-- "로그인 페이지 만들어줘"
-- "이 함수에 에러 핸들링 추가해줘"
-- "테스트 파일 생성해줘"
-
-**특징:**
-- 실제 파일 생성/수정/삭제
-- 변경 사항 미리보기
-- 승인 후 적용
+**에이전트 워크플로우:**
+```
+Planning → Executing → Observing → Reflecting → Fixing (필요 시)
+                                                   ↓
+                                            Reviewing (선택적 멀티 모델 리뷰)
+```
 
 **사용 흐름:**
-
 1. Agent 모드 선택
 2. 요청 입력 (예: "유틸리티 함수 만들어줘")
-3. AI가 파일 변경 제안
+3. AI가 계획 수립 → 실행 → 결과 관찰 → 반성 → (필요 시) 수정
 4. **Pending File Operations** 패널에서 변경 목록 확인
 
 ```
@@ -307,51 +150,249 @@ AI가 직접 파일을 생성, 수정, 삭제하는 모드입니다.
 6. **Apply Changes** 클릭 → 파일에 실제 적용
 7. **Reject** 클릭 → 취소
 
-**주의사항:**
-- 중요한 파일 수정 시 Git 커밋 후 사용 권장
-- 변경 내용을 꼭 확인 후 적용
+---
+
+### 2. 파일 첨부 (@멘션)
+
+입력창에 `@`를 입력하면 프로젝트의 파일, 폴더, 심볼, 진단 정보를 참조할 수 있습니다.
+
+| 멘션 타입 | 예시 | 설명 |
+|------|------|------|
+| `@file` | `@chatPanel.ts` | 파일 내용 첨부 |
+| `@folder` | `@src/agent/` | 폴더 구조 첨부 |
+| `@symbol` | `@AgentEngine` | 심볼 정의 첨부 (Tree-sitter 필요) |
+| `@problems` | `@problems` | 현재 VS Code 진단 정보 첨부 |
+
+```
+┌─────────────────────────────────────┐
+│  📄 extension.ts        src/        │  ← 자동완성
+│  📁 agent/              src/        │
+│  🔷 AgentEngine         engine.ts   │
+│  ⚠️ problems           3 errors     │
+└─────────────────────────────────────┘
+```
+
+파일을 첨부하지 않으면 **현재 열린 파일**과 **선택한 코드**가 자동으로 AI에게 전달됩니다.
 
 ---
 
-### 3. 코드 자동완성 (Ghost Text)
+### 3. 슬래시 명령어 (Skills)
 
-Copilot처럼 코드 작성 중 회색 미리보기로 자동완성을 제안합니다.
+입력창에서 `/`를 입력하면 사용 가능한 명령어 목록이 표시됩니다.
 
-- 자동으로 활성화됨
-- `Tab`을 눌러 제안 수락
-- `Esc`로 제안 무시
+| 명령어 | 설명 |
+|------|------|
+| `/explain` | 코드 설명 |
+| `/refactor` | 리팩토링 제안 |
+| `/fix` | 버그 찾기 및 수정 |
+| `/test` | 유닛 테스트 생성 |
+| `/docs` | 문서화 |
+| `/optimize` | 성능 최적화 |
+| `/security` | 보안 감사 |
 
-설정에서 비활성화:
+#### 커스텀 스킬 만들기
+
+프로젝트에 맞는 커스텀 스킬을 만들 수 있습니다:
+
+```
+Cmd+Shift+P → "Tokamak: Initialize Skills Folder"
+```
+
+```markdown
+<!-- .tokamak/skills/review.md -->
+---
+description: 시니어 개발자 관점 코드 리뷰
+---
+
+이 코드를 시니어 개발자 관점에서 리뷰해주세요:
+1. 코드 품질 및 베스트 프랙티스
+2. 잠재적 버그나 엣지 케이스
+3. 보안 이슈
+```
+
+팀원들과 Git으로 공유할 수 있고, 코드 수정 없이 스킬을 추가/수정할 수 있습니다.
+
+---
+
+### 4. 자동 승인 시스템
+
+에이전트 액션의 자동 승인/수동 확인을 도구별로 설정합니다.
+
+| 도구 | 기본값 | 설명 |
+|------|------|------|
+| `read_file` | always_allow | 파일 읽기 |
+| `search` | always_allow | 코드 검색 |
+| `write_file` | ask | 파일 쓰기/편집 |
+| `create_file` | ask | 파일 생성 |
+| `delete_file` | ask | 파일 삭제 |
+| `terminal_command` | ask | 터미널 명령 실행 |
+
+- **경로 기반 규칙:** `src/test/**`는 자동 승인, `src/config/**`는 항상 확인
+- **명령 패턴:** `npm test`는 자동 승인, `rm *`은 확인 필요
+
+---
+
+### 5. 컨텍스트 윈도우 자동 압축
+
+컨텍스트 사용량이 75%를 초과하면 자동으로 대화 이력을 압축합니다.
+
+- 최근 메시지는 원본 유지
+- 오래된 대화는 LLM을 통해 요약
+- UI에 컨텍스트 사용률 표시
+- 컨텍스트 오버플로우 크래시 방지
+
+---
+
+### 6. 터미널 피드백 루프
+
+터미널 명령 실패 시 에러를 자동 파싱하여 수정을 시도합니다.
+
+**지원 에코시스템:**
+- TypeScript (`tsc` 에러 — 파일/라인/컬럼 포함)
+- Vitest (테스트 실패 — 스택 트레이스 포함)
+- npm (의존성 에러)
+- Python (트레이스백)
+- Go (컴파일 에러)
+
+---
+
+### 7. Tree-sitter AST 통합
+
+WASM 기반 코드 파싱으로 코드 구조를 정확하게 이해합니다.
+
+- **지원 언어:** TypeScript, JavaScript, Python, Go
+- **활용:** 심볼 검색(`@symbol`), 스마트 파일 아웃라인, 의존성 분석
+- **Graceful degradation:** Tree-sitter 사용 불가 시 정규식으로 폴백
+
+---
+
+### 8. 멀티 모델 리뷰 & 토론
+
+별도 AI 모델을 사용한 코드 품질 검증 (선택적).
+
+| 전략 | 설명 |
+|------|------|
+| `review` | 다른 모델이 코드 변경을 리뷰 |
+| `red-team` | 다른 모델이 구현을 적대적으로 비평 |
+| `debate` | 다른 모델이 계획 방식을 토론 |
+| `perspectives` | 다른 모델이 대안적 관점 제공 |
+
+설정에서 활성화: `tokamak.enableMultiModelReview: true`
+
+---
+
+### 9. 프로젝트 규칙 시스템
+
+`.tokamak/rules/`에 프로젝트별 코딩 규칙을 정의합니다:
+
+```yaml
+# .tokamak/rules/ts-conventions.md
+---
+description: TypeScript 코딩 컨벤션
+condition:
+  languages: [typescript, typescriptreact]
+  modes: [agent]
+priority: 10
+---
+- strict TypeScript 사용. `any` 금지.
+- 객체 형태는 `type`보다 `interface` 선호.
+- 모든 함수에 명시적 반환 타입 작성.
+```
+
+언어, 모드, 파일 경로에 따라 규칙이 조건부로 활성화됩니다.
+
+---
+
+### 10. 훅 시스템
+
+`.tokamak/hooks.json`으로 에이전트 액션 전후에 커스텀 스크립트를 실행합니다:
+
 ```json
 {
-  "tokamak.enableInlineCompletion": false
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "command": "node ./scripts/validate.js",
+      "toolFilter": ["write_file"],
+      "blocking": true,
+      "timeout": 30000
+    }
+  ]
 }
 ```
 
+**이벤트:** `PreToolUse`, `PostToolUse`, `PreApproval`, `PostApproval`, `PreMessage`, `PostMessage`
+
 ---
 
-### 3. 코드 설명 / 리팩토링
+### 11. MCP (Model Context Protocol) 지원
+
+MCP 프로토콜을 통해 외부 도구와 서비스를 연결합니다.
+
+`.tokamak/mcp.json`에서 설정:
+
+```json
+{
+  "servers": [
+    {
+      "name": "database",
+      "transport": "stdio",
+      "command": "node",
+      "args": ["./mcp-servers/db-server.js"],
+      "enabled": true
+    }
+  ]
+}
+```
+
+MCP 도구는 에이전트의 사용 가능한 액션에 자동으로 추가됩니다.
+
+---
+
+### 12. 브라우저 자동화
+
+Puppeteer 기반 브라우저 제어로 웹 앱 테스트 및 디버깅을 지원합니다.
+
+**액션:** navigate, screenshot, click, type, evaluate (JavaScript 실행), close
+
+설정에서 활성화: `tokamak.enableBrowser: true`
+
+프로젝트에 `puppeteer-core`가 설치되어 있어야 합니다.
+
+---
+
+### 13. 코드 자동완성 (Ghost Text)
+
+Copilot처럼 코드 작성 중 회색 미리보기로 자동완성을 제안합니다.
+
+- `Tab`을 눌러 제안 수락
+- `Esc`로 제안 무시
+- 비활성화: `tokamak.enableInlineCompletion: false`
+
+---
+
+### 14. 스트리밍 Diff 표시
+
+AI가 응답을 생성하는 도중에 파일 변경 사항을 실시간으로 확인할 수 있습니다.
+
+---
+
+### 15. 자동 지식 수집
+
+표준 파일(`package.json`, `tsconfig.json`, `README.md` 등)에서 프로젝트 정보를 자동 추출합니다. 기본적인 프로젝트 정보는 `.tokamak/knowledge/` 수동 설정 없이도 사용 가능합니다.
+
+---
+
+### 16. 코드 설명 / 리팩토링
 
 코드를 선택한 후 우클릭 메뉴에서 사용할 수 있습니다.
 
 #### Explain Code (코드 설명)
-
-1. 코드 선택
-2. 우클릭 → **Tokamak: Explain Code**
-3. Output 패널에 설명 표시
+1. 코드 선택 → 우클릭 → **Tokamak: Explain Code**
 
 #### Refactor Code (코드 리팩토링)
-
-1. 코드 선택
-2. 우클릭 → **Tokamak: Refactor Code**
-3. 리팩토링 유형 선택:
-   - Improve Readability (가독성 개선)
-   - Optimize Performance (성능 최적화)
-   - Add Error Handling (에러 처리 추가)
-   - Extract Function (함수 추출)
-   - Add Types (타입 추가)
-   - Custom (직접 입력)
-4. 결과 확인 후 Apply Changes 클릭
+1. 코드 선택 → 우클릭 → **Tokamak: Refactor Code**
+2. 리팩토링 유형 선택 (가독성, 성능, 에러 처리, 함수 추출, 타입 추가, 직접 입력)
 
 ---
 
@@ -365,51 +406,56 @@ Copilot처럼 코드 작성 중 회색 미리보기로 자동완성을 제안합
 | Tokamak: Refactor Code | - | 선택한 코드 리팩토링 |
 | Tokamak: Clear Chat History | - | 채팅 기록 삭제 |
 | Tokamak: Initialize Skills Folder | - | 커스텀 스킬 폴더 생성 |
+| Tokamak: Initialize Knowledge Folder | - | 지식 폴더 생성 |
+| Tokamak: Initialize Rules | - | 규칙 폴더 생성 |
+| Tokamak: Configure MCP | - | MCP 서버 설정 |
+
+---
+
+## 프로젝트 설정 구조
+
+```
+.tokamak/
+├── skills/         — 슬래시 명령어 (/explain, /fix, 커스텀)
+│   ├── explain.md
+│   ├── refactor.md
+│   └── ...
+├── knowledge/      — 프로젝트 지식 (AI 컨텍스트에 자동 주입)
+│   └── conventions.md
+├── rules/          — 코딩 규칙 (조건부 활성화)
+│   └── ts-conventions.md
+├── mcp.json        — MCP 서버 설정
+└── hooks.json      — Pre/Post 훅 설정
+```
 
 ---
 
 ## 문제 해결
 
 ### API 연결 오류
-
-```
-Error: 500 litellm.InternalServerError: Connection error
-```
-
 - LiteLLM 서버 상태 확인
 - 모델명이 올바른지 확인
-- 네트워크 연결 확인
+- 네트워크/VPN 연결 확인
 
 ### 채팅이 열리지 않음
-
 - `Cmd+Shift+P` → "Tokamak: Open Chat" 실행
 - Extension이 활성화되었는지 확인
 
 ### 자동완성이 작동하지 않음
-
-- 설정에서 `tokamak.enableInlineCompletion`이 `true`인지 확인
+- `tokamak.enableInlineCompletion`이 `true`인지 확인
 - API Key가 설정되었는지 확인
-
----
-
-## 개발
-
-```bash
-# 컴파일 (한 번)
-npm run compile
-
-# 감시 모드 (파일 변경 시 자동 컴파일)
-npm run watch
-
-# VSIX 패키징
-npm run package
-```
 
 ---
 
 ## 기술 스택
 
-- **언어**: TypeScript
-- **빌드**: tsc
-- **API**: OpenAI Node.js SDK
-- **패키징**: vsce
+| 항목 | 기술 |
+|------|------|
+| 언어 | TypeScript (strict, Node16 모듈) |
+| 빌드 | esbuild (번들) + tsc (타입 체크) |
+| 테스트 | Vitest (297개 테스트) |
+| API | OpenAI Node.js SDK (LiteLLM 호환) |
+| AST | web-tree-sitter (WASM) |
+| 설정 | YAML (규칙), JSON (MCP, 훅) |
+| 브라우저 | puppeteer-core (선택적) |
+| 패키징 | vsce |

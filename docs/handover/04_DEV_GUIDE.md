@@ -50,7 +50,7 @@ npm test            # 297 tests 모두 통과해야 정상
 npm run package
 
 # VS Code에 직접 설치
-code --install-extension tokamak-agent-0.1.2.vsix
+code --install-extension tokamak-agent-0.1.3.vsix
 ```
 
 ### 로그 확인
@@ -154,14 +154,14 @@ npm run bundle
 
 ```bash
 npm run package
-# → tokamak-agent-0.1.2.vsix
+# → tokamak-agent-0.1.3.vsix
 ```
 
 ### 설치
 
 ```bash
 # CLI로 설치
-code --install-extension tokamak-agent-0.1.2.vsix
+code --install-extension tokamak-agent-0.1.3.vsix
 
 # 또는 VS Code UI
 # Extensions 뷰 → ⋯ → Install from VSIX...

@@ -1,6 +1,8 @@
 # Tokamak AI Agent
 
-A VS Code Extension that brings the company's internal AI models (LiteLLM-based OpenAI-compatible API) directly into your development workflow.
+A VS Code Extension that brings the company's internal AI models (LiteLLM-based OpenAI-compatible API) directly into your development workflow — featuring an autonomous agent with file operations, multi-model review, and extensible tool system.
+
+**Version:** 0.1.3 | **Tests:** 297 | **Supported Models:** Qwen, GLM, Minimax, OpenAI, Claude, Gemini
 
 ---
 
@@ -15,11 +17,31 @@ You can easily install the extension using the pre-built VSIX file without build
 4. Select **Install from VSIX...**.
 5. Select the downloaded `.vsix` file.
 
+### 2. Build from Source (For Developers)
+
+```bash
+# Install dependencies
+npm install
+
+# Run tests (297 tests)
+npm test
+
+# Bundle for packaging
+npm run bundle
+
+# Package as VSIX
+npm run package
+
+# Or debug in VS Code: press F5
+```
+
 ---
 
 ## API Configuration
 
 Open Settings (`Cmd+,` on Mac / `Ctrl+,` on Windows) and search for `tokamak`.
+
+### Basic Settings
 
 | Setting | Description | Required |
 |------|------|:----:|
@@ -29,6 +51,19 @@ Open Settings (`Cmd+,` on Mac / `Ctrl+,` on Windows) and search for `tokamak`.
 | `tokamak.enableInlineCompletion` | Enable/Disable Ghost Text auto-completion | - |
 | `tokamak.completionDebounceMs` | Auto-completion delay (default 300ms) | - |
 
+### Agent & Automation Settings
+
+| Setting | Description | Default |
+|------|------|:----:|
+| `tokamak.enableCheckpoints` | Enable checkpoint save/restore | `false` |
+| `tokamak.enableMultiModelReview` | Enable multi-model code review | `false` |
+| `tokamak.enableBrowser` | Enable browser automation | `false` |
+| `tokamak.autoApproval.enabled` | Enable auto-approval for agent actions | `false` |
+| `tokamak.autoApproval.tools.*` | Per-tool approval level (always_allow / ask / deny) | varies |
+| `tokamak.autoApproval.allowedPaths` | Glob patterns for auto-approved paths | `[]` |
+| `tokamak.autoApproval.protectedPaths` | Glob patterns for always-confirm paths | `[]` |
+| `tokamak.autoApproval.allowedCommands` | Allowed terminal command patterns | `[]` |
+
 **Example settings.json:**
 ```json
 {
@@ -36,189 +71,28 @@ Open Settings (`Cmd+,` on Mac / `Ctrl+,` on Windows) and search for `tokamak`.
   "tokamak.models": [
     "qwen3-235b",
     "qwen3-80b-next",
-    "qwen3-coder-flash",
     "minimax-m2.5",
-    "glm-4.7"
+    "glm-4.7",
+    "gpt-4o",
+    "claude-sonnet-4-20250514",
+    "gemini-2.0-flash"
   ],
-  "tokamak.selectedModel": "qwen3-235b"
+  "tokamak.selectedModel": "qwen3-235b",
+  "tokamak.enableMultiModelReview": true,
+  "tokamak.autoApproval.enabled": true,
+  "tokamak.autoApproval.tools.read_file": "always_allow",
+  "tokamak.autoApproval.tools.write_file": "ask",
+  "tokamak.autoApproval.allowedCommands": ["npm test", "npm run *"]
 }
 ```
 
 ---
 
-## Build from Source (For Developers)
-
-### 1. Build Extension
-
-```bash
-# Install dependencies
-npm install
-
-# Compile source code
-npm run compile
-```
-
-### 2. Run in Development Mode
-
-Open the project folder in VS Code and press `F5` to launch the **Extension Development Host**.
-
-
----
-
 ## Core Features
 
-### 1. AI Chat
+### 1. AI Chat (3 Modes)
 
-**Open Chat:**
-- Shortcut: `Cmd+Shift+I` (Mac) / `Ctrl+Shift+I` (Windows)
-- Or: `Cmd+Shift+P` → "Tokamak: Open Chat"
-
-The chat panel opens alongside your editor, allowing you to see your code and the AI conversation simultaneously.
-
-```
-┌──────────┬─────────────────┬─────────────────┐
-│  📁      │                 │                 │
-│  Explorer│   Code Editor   │  Tokamak AI     │
-│  (Folder)│                 │  Chat           │
-└──────────┴─────────────────┴─────────────────┘
-```
-
-#### File Attachment (@mention)
-
-Reference project files easily within the chat.
-
-1. Type `@` in the input field.
-2. Start typing a filename to see suggestions.
-3. Use `↑` `↓` to navigate and `Enter` or `Tab` to attach.
-
-You can attach multiple files to a single message.
-
-```
-┌─────────────────────────────────────┐
-│  📄 extension.ts        src/        │  ← Suggestions
-│  📄 chatPanel.ts        src/chat/   │
-│  📄 client.ts           src/api/    │
-└─────────────────────────────────────┘
-┌─────────────────────────────────────┐
-│ 📄 extension.ts ×  📄 client.ts ×   │  ← Attached Files
-├─────────────────────────────────────┤
-│ Compare these two files               │  ← Message Input
-└─────────────────────────────────────┘
-```
-
-- **Click File Tag**: Open the file in the editor.
-- **Click ×**: Remove the attachment.
-
-#### Automatic Context
-
-If no files are explicitly mentioned, the AI automatically receives the **currently active file** and any **selected code** as context.
-
-#### Model Selection
-
-Switch between different models using the dropdown at the top of the chat panel.
-
-#### Code Insertion
-
-Click the `Insert` button on a code block in the AI's response to insert the code at your current cursor position.
-
-#### Run Terminal Commands
-
-Click the `▶ Run` button on bash/shell code blocks to execute commands directly in the integrated terminal.
-
-#### Send Selection to Chat
-
-Highlight code, right-click, and select **Tokamak: Send to Chat** to quickly move code snippets to the chat input.
-
-#### Chat History
-
-Conversation history is saved automatically and persists across VS Code restarts (saved per project).
-
----
-
-### 2. Slash Commands (Skills)
-
-Type `/` in the input field to access quick actions.
-
-```
-┌─────────────────────────────────────┐
-│ ⚡ /explain    Explain code         │
-│ ⚡ /refactor   Suggest refactoring  │
-│ ⚡ /fix        Find and fix bugs    │
-│ ⚡ /test       Generate unit tests  │
-│ ⚡ /docs       Add documentation    │
-│ ⚡ /optimize   Optimize performance │
-│ ⚡ /security   Security audit       │
-└─────────────────────────────────────┘
-```
-
-**Examples:**
-- `/explain` - Explains selected code or the open file.
-- `/fix This function returns null` - Request a fix with additional context.
-- `/test` - Automatically generates test code.
-
-#### Creating Custom Skills
-
-You can define project-specific skills for your team.
-
-**1. Initialize Skills Folder:**
-```
-Cmd+Shift+P → "Tokamak: Initialize Skills Folder"
-```
-
-This creates the `.tokamak/skills/` directory with default templates.
-
-**2. Skills Directory Structure:**
-```
-Project/
-├── .tokamak/
-│   └── skills/
-│       ├── explain.md      → /explain
-│       ├── refactor.md     → /refactor
-│       ├── my-custom.md    → /my-custom (Add your own)
-│       └── ...
-```
-
-**3. Skill File Format:**
-```markdown
----
-description: Skill description (shown in autocomplete)
----
-
-Enter the prompt you want to send to the AI here.
-Markdown formatting is supported.
-
-Example:
-1. First instruction
-2. Second instruction
-```
-
-**4. Example - Code Review Skill (`review.md`):**
-```markdown
----
-description: Senior developer perspective code review
----
-
-Please review this code from a senior developer's perspective:
-
-1. Code quality and best practices
-2. Potential bugs or edge cases
-3. Security issues
-4. Performance concerns
-5. Suggestions for improvement
-
-Provide specific and constructive feedback.
-```
-
-**Benefits:**
-- Share standard prompts with your team via Git.
-- Tailor skills to specific project needs.
-- Update/add skills without touching the extension source code.
-
----
-
-### 3. Chat Modes
-
-Choose from three distinct interaction modes at the top of the chat panel.
+**Open Chat:** `Cmd+Shift+I` (Mac) / `Ctrl+Shift+I` (Windows)
 
 ```
 ┌─────────────────────────────────────┐
@@ -227,90 +101,252 @@ Choose from three distinct interaction modes at the top of the chat panel.
 ```
 
 #### 💬 Ask Mode (Default)
-
-The classic Q&A interaction.
-
-- "How does this function work?"
-- "How do I fix this error?"
-- "Explain state management in React."
-
-**Best for:** Simple questions and general knowledge.
-
----
+Classic Q&A interaction. Best for simple questions and explanations.
 
 #### 📋 Plan Mode
+Architectural planning — provides structured implementation steps **without writing code**.
 
-Focuses on architectural planning before implementation.
+#### 🤖 Agent Mode
+Autonomous AI agent that can:
+- **Create, edit, delete files** with diff preview
+- **Run terminal commands** and parse errors automatically
+- **Search codebase** with AST-aware ranking
+- **Use external tools** via MCP protocol
+- **Control browsers** via Puppeteer
+- **Self-fix** based on diagnostic feedback
 
-- "I want to add user authentication. How should I approach it?"
-- "I want to split this code into microservices."
-- "What do I need to do to write test code for this?"
-
-**Provides:** Structured implementation steps, files to modify, and potential challenges **without writing code**.
+**Agent Workflow:**
+```
+Planning → Executing → Observing → Reflecting → Fixing (if needed)
+                                                   ↓
+                                            Reviewing (optional multi-model review)
+```
 
 ---
 
-#### 🤖 Agent Mode
+### 2. File Attachment (@mention)
 
-The AI acts as an autonomous agent that can create, edit, and delete files.
+Type `@` in the input field to reference project files, folders, symbols, or diagnostics.
 
-- "Create a login page."
-- "Add error handling to this function."
-- "Generate a test file."
-
-**Workflow:**
-1. Select Agent mode.
-2. Enter your request.
-3. Review proposed file changes in the **Pending File Operations** panel.
+| Mention Type | Example | Description |
+|------|------|------|
+| `@file` | `@chatPanel.ts` | Attach file contents |
+| `@folder` | `@src/agent/` | Attach folder structure |
+| `@symbol` | `@AgentEngine` | Attach symbol definition (requires Tree-sitter) |
+| `@problems` | `@problems` | Attach current VS Code diagnostics |
 
 ```
 ┌─────────────────────────────────────┐
-│ ⚡ Pending File Operations          │
-├─────────────────────────────────────┤
-│ [CREATE] src/utils/helper.ts [Preview]│
-│ [EDIT]   src/index.ts        [Preview]│
-│ [DELETE] src/old-file.ts     [Preview]│
-├─────────────────────────────────────┤
-│ [✓ Apply Changes]  [✗ Reject]       │
+│  📄 extension.ts        src/        │  ← Suggestions
+│  📁 agent/              src/        │
+│  🔷 AgentEngine         engine.ts   │
+│  ⚠️ problems           3 errors     │
 └─────────────────────────────────────┘
 ```
 
-4. Click **Preview** to see a Diff of the changes.
-5. Click **Apply Changes** to write to disk, or **Reject** to cancel.
-
 ---
 
-### 4. Inline Completion (Ghost Text)
+### 3. Slash Commands (Skills)
 
-Get real-time suggestions as you type, similar to GitHub Copilot.
+Type `/` in the input field to access quick actions.
 
-- Active by default.
-- Press `Tab` to accept a suggestion.
-- Press `Esc` to ignore.
+| Command | Description |
+|------|------|
+| `/explain` | Explain code |
+| `/refactor` | Suggest refactoring |
+| `/fix` | Find and fix bugs |
+| `/test` | Generate unit tests |
+| `/docs` | Add documentation |
+| `/optimize` | Optimize performance |
+| `/security` | Security audit |
 
-Disable in settings:
-```json
-{
-  "tokamak.enableInlineCompletion": false
-}
+#### Custom Skills
+
+Create project-specific skills in `.tokamak/skills/`:
+
+```
+Cmd+Shift+P → "Tokamak: Initialize Skills Folder"
+```
+
+```markdown
+<!-- .tokamak/skills/review.md -->
+---
+description: Senior developer code review
+---
+
+Review this code for:
+1. Code quality and best practices
+2. Potential bugs or edge cases
+3. Security issues
 ```
 
 ---
 
-### 5. Code Explanation / Refactoring
+### 4. Auto-Approval System
 
-Access features directly from the editor context menu.
+Configure which agent actions are automatically approved vs. require confirmation.
 
-#### Explain Code
-1. Select code.
-2. Right-click → **Tokamak: Explain Code**.
-3. View the explanation in the Output panel.
+| Tool | Default | Description |
+|------|------|------|
+| `read_file` | always_allow | Reading files |
+| `search` | always_allow | Searching codebase |
+| `write_file` | ask | Writing/editing files |
+| `create_file` | ask | Creating new files |
+| `delete_file` | ask | Deleting files |
+| `terminal_command` | ask | Running terminal commands |
 
-#### Refactor Code
-1. Select code.
-2. Right-click → **Tokamak: Refactor Code**.
-3. Choose a refactoring type (Readability, Performance, Error Handling, etc.).
-4. Review and Apply the changes.
+- **Path-based rules:** Auto-approve `src/test/**` but protect `src/config/**`
+- **Command patterns:** Auto-approve `npm test` but require confirmation for `rm *`
+
+---
+
+### 5. Context Window Compression
+
+Automatic conversation compression when context usage exceeds 75%.
+
+- Preserves recent messages intact
+- Summarizes older conversation history via LLM
+- Displays context usage indicator in UI
+- Prevents context overflow crashes
+
+---
+
+### 6. Terminal Feedback Loop
+
+When terminal commands fail, the agent automatically parses errors and attempts fixes.
+
+**Supported ecosystems:**
+- TypeScript (`tsc` errors with file/line/column)
+- Vitest (test failures with stack traces)
+- npm (dependency errors)
+- Python (tracebacks)
+- Go (compile errors)
+
+---
+
+### 7. Tree-sitter AST Integration
+
+WASM-based code parsing for intelligent code understanding.
+
+- **Languages:** TypeScript, JavaScript, Python, Go
+- **Used for:** Symbol search (`@symbol`), smart file outline, dependency analysis
+- **Graceful degradation:** Falls back to regex if Tree-sitter unavailable
+
+---
+
+### 8. Multi-Model Review & Debate
+
+Optional code quality verification using a separate AI model.
+
+| Strategy | Description |
+|------|------|
+| `review` | Second model reviews code changes for bugs/quality |
+| `red-team` | Second model adversarially critiques the implementation |
+| `debate` | Second model debates the plan approach |
+| `perspectives` | Second model provides alternative viewpoints |
+
+Enable in settings: `tokamak.enableMultiModelReview: true`
+
+---
+
+### 9. Project Rules System
+
+Define project-specific coding rules in `.tokamak/rules/`:
+
+```yaml
+# .tokamak/rules/ts-conventions.md
+---
+description: TypeScript conventions
+condition:
+  languages: [typescript, typescriptreact]
+  modes: [agent]
+priority: 10
+---
+- Use strict TypeScript. No `any`.
+- Prefer `interface` over `type` for object shapes.
+- All functions must have explicit return types.
+```
+
+Rules are conditionally activated based on language, mode, and file path.
+
+---
+
+### 10. Hooks System
+
+Execute custom scripts before/after agent actions via `.tokamak/hooks.json`:
+
+```json
+{
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "command": "node ./scripts/validate.js",
+      "toolFilter": ["write_file"],
+      "blocking": true,
+      "timeout": 30000
+    }
+  ]
+}
+```
+
+**Events:** `PreToolUse`, `PostToolUse`, `PreApproval`, `PostApproval`, `PreMessage`, `PostMessage`
+
+---
+
+### 11. MCP (Model Context Protocol) Support
+
+Connect external tools and services via the MCP protocol.
+
+Configure in `.tokamak/mcp.json`:
+
+```json
+{
+  "servers": [
+    {
+      "name": "database",
+      "transport": "stdio",
+      "command": "node",
+      "args": ["./mcp-servers/db-server.js"],
+      "enabled": true
+    }
+  ]
+}
+```
+
+MCP tools appear in the agent's available actions and can be called during autonomous execution.
+
+---
+
+### 12. Browser Automation
+
+Puppeteer-based browser control for web app testing and debugging.
+
+**Actions:** navigate, screenshot, click, type, evaluate JavaScript, close
+
+Enable in settings: `tokamak.enableBrowser: true`
+
+Requires `puppeteer-core` to be installed in the project.
+
+---
+
+### 13. Inline Completion (Ghost Text)
+
+Real-time code suggestions as you type, similar to GitHub Copilot.
+
+- Press `Tab` to accept, `Esc` to dismiss
+- Disable: `tokamak.enableInlineCompletion: false`
+
+---
+
+### 14. Streaming Diff Display
+
+See file changes in real-time as the AI generates them, before the response is complete.
+
+---
+
+### 15. Auto Knowledge Collection
+
+Automatically extracts project context from standard files (`package.json`, `tsconfig.json`, `README.md`, etc.) — no manual `.tokamak/knowledge/` setup needed for basic project info.
 
 ---
 
@@ -324,6 +360,27 @@ Access features directly from the editor context menu.
 | Tokamak: Refactor Code | - | Refactor the selected code |
 | Tokamak: Clear Chat History | - | Delete previous messages |
 | Tokamak: Initialize Skills Folder | - | Create the custom skills directory |
+| Tokamak: Initialize Knowledge Folder | - | Create the knowledge directory |
+| Tokamak: Initialize Rules | - | Create the rules directory |
+| Tokamak: Configure MCP | - | Open MCP server configuration |
+
+---
+
+## Project Configuration
+
+```
+.tokamak/
+├── skills/         — Slash commands (/explain, /fix, custom)
+│   ├── explain.md
+│   ├── refactor.md
+│   └── ...
+├── knowledge/      — Project knowledge (auto-injected into AI context)
+│   └── conventions.md
+├── rules/          — Coding rules (conditionally activated)
+│   └── ts-conventions.md
+├── mcp.json        — MCP server configuration
+└── hooks.json      — Pre/Post hook configuration
+```
 
 ---
 
@@ -340,24 +397,15 @@ Access features directly from the editor context menu.
 
 ---
 
-## Development
-
-```bash
-# Compile (Once)
-npm run compile
-
-# Watch mode (Auto-compile on change)
-npm run watch
-
-# Package as VSIX
-npm run package
-```
-
----
-
 ## Tech Stack
 
-- **Language**: TypeScript
-- **Build**: tsc
-- **API**: OpenAI Node.js SDK
-- **Packaging**: vsce
+| Category | Technology |
+|------|------|
+| Language | TypeScript (strict, Node16 modules) |
+| Build | esbuild (bundle) + tsc (type check) |
+| Test | Vitest (297 tests) |
+| API | OpenAI Node.js SDK (LiteLLM compatible) |
+| AST | web-tree-sitter (WASM) |
+| Config | YAML (rules), JSON (MCP, hooks) |
+| Browser | puppeteer-core (optional) |
+| Packaging | vsce |

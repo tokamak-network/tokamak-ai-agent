@@ -33,7 +33,8 @@
       "Bash(find /Users/harvey/Desktop/project/2026/trackB/tokamak-agent -name \"*.test.ts\" -o -name \"*.spec.ts\" 2>/dev/null | xargs grep -l \"streamingDiffParser\\\\|autoCollector\\\\|browserService\\\\|browser\" 2>/dev/null)",
       "Bash(npm ls puppeteer-core --all 2>&1 | head -20)",
       "Bash(npm ls puppeteer-core --all --production 2>&1 | grep -v \"deduped\")",
-      "Bash(find /Users/harvey/Desktop/project/2026/trackB/tokamak-agent -type d -name \"src\" | head -1 | xargs ls -la)"
+      "Bash(find /Users/harvey/Desktop/project/2026/trackB/tokamak-agent -type d -name \"src\" | head -1 | xargs ls -la)",
+      "Bash(npm run package 2>&1)"
     ]
   }
 }
