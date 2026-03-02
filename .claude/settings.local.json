@@ -28,7 +28,8 @@
       "Bash(ls node_modules/web-tree-sitter/*.wasm 2>/dev/null; ls node_modules/web-tree-sitter/*.js 2>/dev/null)",
       "Bash(npm run copy:parsers 2>&1 && ls -lh parsers/)",
       "Bash(npx vitest run src/__tests__/treeSitter.test.ts 2>&1)",
-      "Bash(npx tsc --noEmit 2>&1 | tail -5 && npm test 2>&1 | tail -5)"
+      "Bash(npx tsc --noEmit 2>&1 | tail -5 && npm test 2>&1 | tail -5)",
+      "Bash(find /Users/harvey/Desktop/project/2026/trackB/tokamak-agent/src/__tests__ -type f -name \"*.test.ts\" | xargs ls -la)"
     ]
   }
 }

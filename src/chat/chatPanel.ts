@@ -27,6 +27,7 @@ import { HookRunner } from '../hooks/hookRunner.js';
 import { StreamingDiffParser } from '../streaming/streamingDiffParser.js';
 import { AutoCollector } from '../knowledge/autoCollector.js';
 import { getBrowserActionDocs } from '../browser/browserActions.js';
+import { DiagnosticDiffTracker } from '../agent/diagnosticDiffTracker.js';
 
 
 interface ChatSession {
@@ -67,6 +68,11 @@ export class ChatPanel {
     private hookRunner: HookRunner = new HookRunner();
     private streamingDiffParser: StreamingDiffParser = new StreamingDiffParser();
     private autoCollector: AutoCollector = new AutoCollector();
+
+    // --- F6: Diagnostic-based auto-fix ---
+    private diagnosticDiffTracker: DiagnosticDiffTracker = new DiagnosticDiffTracker();
+    private isAutoFixing: boolean = false;
+    private deferredDiagnosticWatcher: vscode.Disposable | null = null;
 
     public static setContext(context: vscode.ExtensionContext): void {
         ChatPanel.extensionContext = context;
@@ -304,9 +310,17 @@ export class ChatPanel {
             case 'openFile':
                 await this.openFile(message.path);
                 break;
-            case 'applyOperations':
-                await this.applyFileOperations();
+            case 'applyOperations': {
+                const fixAbort = new AbortController();
+                const prevAbort = this.currentAbortController;
+                this.currentAbortController = fixAbort;
+                try {
+                    await this.applyFileOperations();
+                } finally {
+                    this.currentAbortController = prevAbort;
+                }
                 break;
+            }
             case 'rejectOperation':
                 if (message.index !== undefined && message.index >= 0 && message.index < this.pendingOperations.length) {
                     this.pendingOperations.splice(message.index, 1);
@@ -1118,11 +1132,15 @@ export class ChatPanel {
         return null;
     }
 
-    private async applyFileOperations(): Promise<void> {
+    /**
+     * Core file apply logic — stages edits, applies WorkspaceEdit, saves files.
+     * Returns result info so the orchestrator can decide on follow-up actions.
+     */
+    private async applyFileOperationsCore(): Promise<{ success: boolean; successCount: number; modifiedUris: vscode.Uri[] }> {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (!workspaceFolder) {
             vscode.window.showErrorMessage('No workspace folder open');
-            return;
+            return { success: false, successCount: 0, modifiedUris: [] };
         }
 
         let successCount = 0;
@@ -1250,7 +1268,7 @@ export class ChatPanel {
                                 }
 
                                 if (extractedSearch && currentContent.includes(extractedSearch)) {
-                                    // LLM이 content를 엉뚱하게 줬을 수도 있으니, extractedReplace를 우선으로 쓰되, 
+                                    // LLM이 content를 엉뚱하게 줬을 수도 있으니, extractedReplace를 우선으로 쓰되,
                                     // op.content가 명시되어 있다면 op.content가 더 정확할 수 있으므로 op.content로 대체
                                     const replacement = op.content.length > 0 ? op.content : extractedReplace;
                                     currentContent = currentContent.replace(extractedSearch, replacement);
@@ -1306,27 +1324,24 @@ export class ChatPanel {
 
         // 일괄 실행
         const success = await vscode.workspace.applyEdit(edit);
+        const modifiedUris: vscode.Uri[] = [];
 
         if (success) {
             if (successCount > 0) {
                 // 수정된 파일들을 명시적으로 저장
-                const modifiedFiles: vscode.Uri[] = [];
                 for (const op of this.pendingOperations) {
                     if (op.type === 'create' || op.type === 'edit' || op.type === 'write_full' || op.type === 'replace' || op.type === 'prepend' || op.type === 'append') {
                         const fileUri = vscode.Uri.joinPath(workspaceFolder.uri, op.path);
-                        modifiedFiles.push(fileUri);
+                        modifiedUris.push(fileUri);
                     }
                 }
 
                 // 각 파일을 저장 (이미 열려있거나 새로 생성된 파일)
-                for (const fileUri of modifiedFiles) {
+                for (const fileUri of modifiedUris) {
                     try {
-                        // 파일이 이미 열려있으면 저장, 없으면 열어서 저장
                         const doc = await vscode.workspace.openTextDocument(fileUri);
-                        // WorkspaceEdit 후 명시적으로 저장
                         await doc.save();
                     } catch (error) {
-                        // 파일이 저장할 수 없는 경우 FileSystem API로 직접 저장
                         try {
                             const op = this.pendingOperations.find(p => {
                                 const opUri = vscode.Uri.joinPath(workspaceFolder.uri, p.path);
@@ -1342,27 +1357,6 @@ export class ChatPanel {
                 }
 
                 vscode.window.showInformationMessage(`Successfully applied and saved ${successCount} file operation(s).`);
-
-                // ── Multi-Model Review: Apply Changes 성공 후 리뷰 시작 ──
-                // Apply Fix에서 온 수정인 경우 리뷰를 건너뛴다 (무한 루프 방지)
-                if (this.skipNextReview) {
-                    this.skipNextReview = false;
-                } else if (this.currentMode === 'agent' && this.agentEngine && getEnableMultiModelReview()) {
-                    const opDescriptions = this.pendingOperations.map(op =>
-                        `[${op.type}] ${op.path}${op.description ? ': ' + op.description : ''}`
-                    );
-                    const resultSummary = `Applied ${successCount} operation(s) successfully.`;
-
-                    // pendingOperations를 먼저 비우고, 리뷰 시작 (비동기 — UI 블록하지 않음)
-                    const savedOps = [...this.pendingOperations];
-                    this.pendingOperations = [];
-                    this.panel.webview.postMessage({ command: 'operationsCleared' });
-
-                    this.agentEngine.startReviewForOperations(opDescriptions, resultSummary).catch(err => {
-                        logger.error('[ChatPanel]', 'Review for operations failed', err);
-                    });
-                    return; // early return — pendingOperations 이미 비움
-                }
             }
         } else {
             logger.error('[ChatPanel]', 'WorkspaceEdit failed. Check for read-only files or conflicting edits.');
@@ -1373,8 +1367,335 @@ export class ChatPanel {
             }
         }
 
+        return { success, successCount, modifiedUris };
+    }
+
+    /**
+     * Orchestrator: capture diagnostics → apply files → auto-fix → multi-model review.
+     */
+    private async applyFileOperations(): Promise<void> {
+        // 1. Capture diagnostic snapshot BEFORE applying
+        await this.diagnosticDiffTracker.captureSnapshot();
+
+        // 2. Save operations for post-apply processing
+        const savedOps = [...this.pendingOperations];
+
+        // 3. Apply file operations
+        const result = await this.applyFileOperationsCore();
+
+        // 4. Diagnostic auto-fix (only if not already in an auto-fix loop)
+        let autoFixRan = false;
+        if (result.success && result.successCount > 0 && !this.isAutoFixing) {
+            const signal = this.currentAbortController?.signal;
+            autoFixRan = await this.attemptDiagnosticAutoFix(result.modifiedUris, signal);
+
+            // If no errors found yet, TS server may be slow (especially for new files).
+            // Set up a background watcher that triggers auto-fix when errors eventually appear.
+            if (!autoFixRan) {
+                this.setupDeferredDiagnosticWatch(result.modifiedUris);
+            }
+        }
+
+        // 5. Multi-model review (skip if auto-fix ran or skipNextReview is set)
+        if (result.success && result.successCount > 0) {
+            if (this.skipNextReview) {
+                this.skipNextReview = false;
+            } else if (!autoFixRan && this.currentMode === 'agent' && this.agentEngine && getEnableMultiModelReview()) {
+                const opDescriptions = savedOps.map(op =>
+                    `[${op.type}] ${op.path}${op.description ? ': ' + op.description : ''}`
+                );
+                const resultSummary = `Applied ${result.successCount} operation(s) successfully.`;
+
+                this.pendingOperations = [];
+                this.panel.webview.postMessage({ command: 'operationsCleared' });
+
+                this.agentEngine.startReviewForOperations(opDescriptions, resultSummary).catch(err => {
+                    logger.error('[ChatPanel]', 'Review for operations failed', err);
+                });
+                return; // early return — pendingOperations already cleared
+            }
+        }
+
         this.pendingOperations = [];
         this.panel.webview.postMessage({ command: 'operationsCleared' });
+    }
+
+    /**
+     * Wait for VS Code diagnostic updates on the given file URIs.
+     * Uses debounce: waits until no new diagnostic events fire for `stabilizeMs`
+     * after the last change, so the language server has time to finish analysis.
+     * If no events arrive at all, polls diagnostics at intervals to catch
+     * slow language server starts (e.g., newly created files).
+     */
+    private waitForDiagnosticUpdate(fileUris: vscode.Uri[], timeoutMs = 5000, stabilizeMs = 800): Promise<void> {
+        return new Promise<void>((resolve) => {
+            const targetPaths = new Set(fileUris.map(u => u.toString()));
+            let resolved = false;
+            let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+            let eventReceived = false;
+
+            const finish = () => {
+                if (resolved) return;
+                resolved = true;
+                if (debounceTimer) clearTimeout(debounceTimer);
+                if (pollInterval) clearInterval(pollInterval);
+                listener.dispose();
+                resolve();
+            };
+
+            const listener = vscode.languages.onDidChangeDiagnostics((e) => {
+                if (resolved) return;
+                const relevant = e.uris.some(uri => targetPaths.has(uri.toString()));
+                if (!relevant) return;
+
+                eventReceived = true;
+                // Reset debounce timer on each relevant event
+                if (debounceTimer) clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(finish, stabilizeMs);
+            });
+
+            // Poll diagnostics every 1.5s as fallback for slow language servers.
+            // If diagnostics appear for target files before any event fires, resolve.
+            const pollInterval = setInterval(() => {
+                if (resolved || eventReceived) return;
+                const allDiags = vscode.languages.getDiagnostics();
+                for (const [uri, diags] of allDiags) {
+                    if (targetPaths.has(uri.toString()) && diags.length > 0) {
+                        // Diagnostics appeared via polling — wait stabilize then finish
+                        if (debounceTimer) clearTimeout(debounceTimer);
+                        debounceTimer = setTimeout(finish, stabilizeMs);
+                        return;
+                    }
+                }
+            }, 1500);
+
+            // Hard timeout fallback
+            setTimeout(finish, timeoutMs);
+        });
+    }
+
+    /**
+     * F6: Attempt to auto-fix diagnostics introduced by the last file apply.
+     * Returns true if auto-fix was attempted (regardless of success).
+     */
+    private async attemptDiagnosticAutoFix(modifiedUris: vscode.Uri[], signal?: AbortSignal): Promise<boolean> {
+        const maxAttempts = 3;
+        let attempted = false;
+
+        this.isAutoFixing = true;
+        try {
+            for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                if (signal?.aborted) break;
+
+                // Wait for language server to update diagnostics
+                // First attempt uses longer timeout — TS server may need time to pick up new files
+                const timeout = attempt === 0 ? 8000 : 5000;
+                await this.waitForDiagnosticUpdate(modifiedUris, timeout);
+
+                // Compare diagnostics before/after
+                const diff = await this.diagnosticDiffTracker.diffFromLast();
+                if (!diff) break;
+
+                logger.info('[ChatPanel]', `Diagnostic diff: +${diff.introduced.length} -${diff.resolved.length} (attempt ${attempt + 1})`);
+
+                // No new errors → success, stop
+                if (diff.introduced.length === 0) break;
+
+                // Too many new errors → warn and bail
+                if (diff.introduced.length > 10) {
+                    this.panel.webview.postMessage({
+                        command: 'addMessage',
+                        role: 'assistant',
+                        content: `⚠️ **${diff.introduced.length} new diagnostic errors detected** — too many to auto-fix. Please review manually.`,
+                    });
+                    break;
+                }
+
+                // 1-10 new errors → attempt AI fix
+                attempted = true;
+                const diffPrompt = this.diagnosticDiffTracker.formatDiffForPrompt(diff);
+
+                // Read contents of files with errors for context
+                const errorFiles = new Set(diff.introduced.map(d => d.file));
+                let fileContexts = '';
+                for (const relPath of errorFiles) {
+                    const content = await this.getFileContent(relPath);
+                    if (content) {
+                        fileContexts += `\n--- ${relPath} ---\n${content}\n`;
+                    }
+                }
+
+                const fixPrompt = [
+                    'The following errors were introduced by the last code changes. Fix them.',
+                    '',
+                    diffPrompt,
+                    '',
+                    '## File Contents',
+                    fileContexts,
+                    '',
+                    'Fix all introduced errors using the FILE_OPERATION format below. Do NOT include any other text.',
+                ].join('\n');
+
+                // Show auto-fix status in UI
+                this.panel.webview.postMessage({
+                    command: 'addMessage',
+                    role: 'assistant',
+                    content: `🔧 **Auto-fix attempt ${attempt + 1}/${maxAttempts}** — fixing ${diff.introduced.length} new error(s)...`,
+                });
+                this.panel.webview.postMessage({ command: 'startStreaming' });
+
+                // Stream AI fix response with explicit FILE_OPERATION format
+                const fixSystemPrompt = `You are a code fixer. Fix the diagnostic errors. Output ONLY <<<FILE_OPERATION>>> blocks. No explanation, no markdown, no thinking.
+
+Format:
+<<<FILE_OPERATION>>>
+TYPE: edit
+PATH: relative/path/to/file
+DESCRIPTION: Brief fix description
+CONTENT:
+<<<<<<< SEARCH
+original code with error
+=======
+fixed code
+>>>>>>> REPLACE
+<<<END_OPERATION>>>
+
+For new files or full rewrites:
+<<<FILE_OPERATION>>>
+TYPE: write_full
+PATH: relative/path/to/file
+DESCRIPTION: Brief fix description
+CONTENT:
+entire file content here
+<<<END_OPERATION>>>`;
+
+                const messages: ChatMessage[] = [
+                    { role: 'system', content: fixSystemPrompt },
+                    { role: 'user', content: fixPrompt },
+                ];
+
+                const streamResult = streamChatCompletion(messages, signal);
+                let fullResponse = '';
+
+                // Use streamingDiffParser to filter out FILE_OPERATION blocks from UI display.
+                // Operations are applied programmatically — don't show them as pending in webview.
+                this.streamingDiffParser.reset();
+                for await (const chunk of streamResult.content) {
+                    if (signal?.aborted) break;
+                    fullResponse += chunk;
+                    const feedResult = this.streamingDiffParser.feed(chunk);
+                    if (feedResult.textContent) {
+                        this.panel.webview.postMessage({ command: 'streamChunk', content: feedResult.textContent });
+                    }
+                    // Intentionally skip streamOperationChunk — we apply fix ops directly
+                }
+
+                this.panel.webview.postMessage({ command: 'endStreaming' });
+                if (signal?.aborted) break;
+
+                // Parse fix operations from AI response
+                const fixOps = parseFileOperations(fullResponse);
+                const writeFixOps = fixOps.filter(op => op.type !== 'read');
+
+                if (writeFixOps.length === 0) {
+                    logger.info('[ChatPanel]', 'Auto-fix: AI returned no file operations');
+                    break;
+                }
+
+                // Apply fix operations
+                this.skipNextReview = true;
+                await this.diagnosticDiffTracker.captureSnapshot();
+                this.pendingOperations = writeFixOps;
+                const fixResult = await this.applyFileOperationsCore();
+
+                if (!fixResult.success || fixResult.successCount === 0) {
+                    logger.warn('[ChatPanel]', 'Auto-fix: failed to apply fix operations');
+                    break;
+                }
+
+                // Add fix response to chat history for context
+                this.chatHistory.push({ role: 'assistant', content: fullResponse });
+
+                // Next iteration will re-check diagnostics
+            }
+        } finally {
+            this.isAutoFixing = false;
+        }
+
+        return attempted;
+    }
+
+    /**
+     * Set up a background watcher for deferred diagnostic detection.
+     * Used when the immediate diagnostic check finds nothing (TS server may be slow).
+     * When errors eventually appear on the target files, triggers auto-fix.
+     */
+    private setupDeferredDiagnosticWatch(fileUris: vscode.Uri[]): void {
+        // Clean up any existing watcher
+        this.deferredDiagnosticWatcher?.dispose();
+        this.deferredDiagnosticWatcher = null;
+
+        const targetPaths = new Set(fileUris.map(u => u.toString()));
+        let disposed = false;
+        let stabilizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+        const cleanup = () => {
+            if (disposed) return;
+            disposed = true;
+            listener.dispose();
+            if (stabilizeTimer) clearTimeout(stabilizeTimer);
+            clearTimeout(hardTimeout);
+            this.deferredDiagnosticWatcher = null;
+        };
+
+        const listener = vscode.languages.onDidChangeDiagnostics(async (e) => {
+            if (disposed || this.isAutoFixing) return;
+
+            const relevant = e.uris.some(uri => targetPaths.has(uri.toString()));
+            if (!relevant) return;
+
+            // Check if there are actual error/warning diagnostics on target files
+            const allDiags = vscode.languages.getDiagnostics();
+            let hasErrors = false;
+            for (const [uri, diags] of allDiags) {
+                if (targetPaths.has(uri.toString())) {
+                    if (diags.some(d =>
+                        d.severity === vscode.DiagnosticSeverity.Error ||
+                        d.severity === vscode.DiagnosticSeverity.Warning
+                    )) {
+                        hasErrors = true;
+                        break;
+                    }
+                }
+            }
+            if (!hasErrors) return;
+
+            // Debounce: wait for diagnostics to stabilize before triggering
+            if (stabilizeTimer) clearTimeout(stabilizeTimer);
+            stabilizeTimer = setTimeout(async () => {
+                if (disposed || this.isAutoFixing) return;
+                cleanup();
+
+                logger.info('[ChatPanel]', 'Deferred diagnostic watch: errors detected, triggering auto-fix');
+
+                // diffFromLast() will compare against the lastSnapshot (set before/during initial apply)
+                // which had no errors for these files, so introduced errors will be detected correctly.
+                const fixAbort = new AbortController();
+                const prevAbort = this.currentAbortController;
+                this.currentAbortController = fixAbort;
+
+                try {
+                    await this.attemptDiagnosticAutoFix(fileUris, fixAbort.signal);
+                } finally {
+                    this.currentAbortController = prevAbort;
+                }
+            }, 1500);
+        });
+
+        // Stop watching after 60 seconds
+        const hardTimeout = setTimeout(cleanup, 60000);
+
+        this.deferredDiagnosticWatcher = { dispose: cleanup };
     }
 
     private async getCheckpoints(): Promise<void> {
@@ -2348,6 +2669,8 @@ Tokamak AI를 사용하려면 API 설정이 필요합니다.
         this.panel.dispose();
 
         // Clean up subsystems
+        this.diagnosticDiffTracker.reset();
+        this.deferredDiagnosticWatcher?.dispose();
         this.ruleLoader.dispose();
         this.mcpConfigManager.dispose();
         this.hookConfigLoader.dispose();
